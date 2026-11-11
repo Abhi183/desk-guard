@@ -1,0 +1,18 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Photos taken by the app (other people's faces, selfies): never commit
+caught/
+snaps/
+
+# Local runtime state
+desk.log
+menubar_settings.json
+.menubar.lock
+.show_request
+.quit_all

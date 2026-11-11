@@ -1,0 +1,15 @@
+#!/bin/bash
+# Project = the folder containing this .app if it has the code, else the build-time path.
+APP_PARENT="$(cd "$(dirname "$0")/../../.." && pwd)"
+if [ -d "$APP_PARENT/webcam_fun" ]; then
+  PROJECT="$APP_PARENT"
+else
+  PROJECT="/Users/shekhara/webcam-fun"
+fi
+PY="$PROJECT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  osascript -e 'display alert "Desk Guard is not set up yet" message "Open Terminal in the desk-guard folder and run:  ./run desk\n\nThe first run installs everything. After that this app works."'
+  exit 1
+fi
+cd "$PROJECT" || exit 1
+exec "$PY" -m webcam_fun.menubar >> "$PROJECT/desk.log" 2>&1

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Usage: ./run desk|gestures|ascii [options]   (add --help after the name for options)
+set -euo pipefail
+cd "$(dirname "$0")"
+
+case "${1:-}" in
+  desk)     module=desk ;;
+  gestures) module=gestures ;;
+  ascii)    module=ascii_cam ;;
+  *) echo "usage: ./run desk|gestures|ascii [options]"; exit 1 ;;
+esac
+shift
+
+if [ ! -x .venv/bin/python ]; then
+  echo "Setting up the Python environment (first run only)..."
+  uv venv -q --python 3.12 .venv
+  uv pip install -q --python .venv/bin/python -r requirements.txt
+fi
+
+exec .venv/bin/python -m "webcam_fun.$module" "$@"
