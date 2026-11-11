@@ -2,7 +2,7 @@
 
 A macOS menu bar app that watches your webcam while you work. It warns you when someone is
 looking over your shoulder, locks the Mac when you walk away, nudges you about posture, and
-lets you control volume and browser tabs with hand gestures. Everything runs locally; no
+lets you control volume, browser tabs and media playback with hand gestures. Everything runs locally; no
 video leaves the machine.
 
 Built and tested on an Apple Silicon MacBook Pro with macOS 26.
