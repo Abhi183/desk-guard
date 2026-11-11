@@ -16,3 +16,6 @@ menubar_settings.json
 .menubar.lock
 .show_request
 .quit_all
+
+# Built locally by tools/make_app.sh (contains your home path)
+Desk Guard.app/

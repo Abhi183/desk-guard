@@ -17,9 +17,9 @@ cd desk-guard
 ./run desk
 ```
 
-The first `./run` creates `.venv` and installs the packages in `requirements.txt`. After that,
-double-click **Desk Guard.app** in the repo folder (or drag a copy anywhere; run
-`tools/make_app.sh` to build a fresh one on your Desktop).
+The first `./run` creates `.venv` and installs the packages in `requirements.txt`. Then build
+the clickable app with `tools/make_app.sh` (puts **Desk Guard.app** on your Desktop, or pass a
+folder, e.g. `tools/make_app.sh .` for the repo folder) and launch it from there.
 
 ## What it does
 
@@ -78,7 +78,6 @@ Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate postur
 ```
 ./run gestures    # gestures only, in their own window
 ./run ascii       # webcam as live ASCII art in the terminal (--style matrix|color|mono)
-python3 extras/matrix.py            # Matrix rain in the terminal (--devanagari, --dense N)
 ```
 
 ## Layout
