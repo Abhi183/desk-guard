@@ -54,7 +54,7 @@ def lock_screen() -> str:
         return "display slept (fallback)"
 
 
-NX_KEYTYPE_SOUND_UP, NX_KEYTYPE_SOUND_DOWN, NX_KEYTYPE_MUTE = 0, 1, 7
+NX_KEYTYPE_SOUND_UP, NX_KEYTYPE_SOUND_DOWN, NX_KEYTYPE_MUTE, NX_KEYTYPE_PLAY = 0, 1, 7, 16
 NS_SYSTEM_DEFINED, MEDIA_KEY_SUBTYPE = 14, 8
 
 
@@ -101,6 +101,15 @@ def toggle_mute() -> bool:
         return True
     _osascript_async("set volume output muted not (output muted of (get volume settings))")
     return False
+
+
+def play_pause() -> bool:
+    """Press the Play/Pause media key (pauses YouTube in Chrome, Spotify, Music...).
+
+    False when key events are blocked (no Accessibility permission); there is no
+    fallback because no AppleScript reaches every player.
+    """
+    return _press_media_key(NX_KEYTYPE_PLAY)
 
 
 def keystroke(script_body: str) -> str | None:

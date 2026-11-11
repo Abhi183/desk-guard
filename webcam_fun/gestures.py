@@ -3,16 +3,14 @@
   thumbs up / down (hold)   volume up / down
   fist (hold)               mute / unmute
   peace sign (hold)         take a webcam selfie
-  rock-on / love-you sign   hearts
+  love-you sign (hold)      play / pause media (YouTube, Spotify, Music...)
   point left / right (hold)  previous / next browser tab (needs Accessibility)
 
 Keys: q quit
 """
 
 import argparse
-import random
 import time
-from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
@@ -25,22 +23,13 @@ from webcam_fun.vision import GESTURE_MODEL, ROOT, open_camera, put_text, requir
 
 WINDOW = "Gestures"
 SNAP_DIR = ROOT / "snaps"
-WHITE, CYAN, PINK, GREEN = (255, 255, 255), (255, 220, 0), (180, 105, 255), (80, 200, 80)
+WHITE, CYAN, GREEN = (255, 255, 255), (255, 220, 0), (80, 200, 80)
 LABELS = {"Thumb_Up": "volume up", "Thumb_Down": "volume down", "Closed_Fist": "mute",
-          "Victory": "selfie", "ILoveYou": "hearts", "Point_Right": "next tab",
+          "Victory": "selfie", "ILoveYou": "play / pause", "Point_Right": "next tab",
           "Point_Left": "previous tab", "Pointing_Up": "point left or right instead"}
 HAND_CONNECTIONS = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
                     (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15),
                     (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17))
-
-
-@dataclass(frozen=True)
-class Heart:
-    x: float
-    y: float
-    vy: float
-    size: int
-    born: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,24 +60,10 @@ def draw_hand(img: np.ndarray, landmarks) -> None:
         cv2.circle(img, p, 4, WHITE, -1, cv2.LINE_AA)
 
 
-def draw_heart(img: np.ndarray, cx: int, cy: int, size: int) -> None:
-    r = size // 2
-    cv2.circle(img, (cx - r // 2 - 1, cy), r // 2 + 1, PINK, -1, cv2.LINE_AA)
-    cv2.circle(img, (cx + r // 2 + 1, cy), r // 2 + 1, PINK, -1, cv2.LINE_AA)
-    tri = np.array([(cx - r - 1, cy + 2), (cx + r + 1, cy + 2), (cx, cy + size)], np.int32)
-    cv2.fillPoly(img, [tri], PINK, cv2.LINE_AA)
-
-
-def spawn_hearts(width: int, height: int, now: float) -> list[Heart]:
-    return [Heart(random.uniform(0, width), height + random.uniform(0, 80),
-                  random.uniform(120, 260), random.randint(18, 40), now) for _ in range(25)]
-
-
 class GestureApp:
     def __init__(self, args: argparse.Namespace) -> None:
         self.send_keys = not args.no_keys
         self.trigger = HoldTrigger(hold_s=0.4, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4})
-        self.hearts: list[Heart] = []
         self.flash_until = 0.0
         self.message, self.message_until = "", 0.0
 
@@ -106,7 +81,10 @@ class GestureApp:
             self.flash_until = now + 0.25
             self.say(f"saved {path.name}", now)
         elif gesture == "ILoveYou":
-            self.hearts = self.hearts + spawn_hearts(frame.shape[1], frame.shape[0], now)
+            if macos.play_pause():
+                self.say("play / pause", now)
+            else:
+                self.say("play / pause blocked: allow Desk Guard / Python in Accessibility", now)
         elif gesture in ("Point_Right", "Point_Left"):
             self.switch_tab(gesture == "Point_Right", now)
 
@@ -155,12 +133,9 @@ class GestureApp:
         return self.message if self.message and now < self.message_until else None
 
     def draw_effects(self, img: np.ndarray, result, now: float) -> np.ndarray:
-        """Hand skeleton, hearts and selfie flash. Returns the (possibly new) image."""
+        """Hand skeleton and selfie flash. Returns the (possibly new) image."""
         for hand in result.hand_landmarks:
             draw_hand(img, hand)
-        self.hearts = [hrt for hrt in self.hearts if now - hrt.born < 3]
-        for hrt in self.hearts:
-            draw_heart(img, int(hrt.x), int(hrt.y - hrt.vy * (now - hrt.born)), hrt.size)
         if now < self.flash_until:
             img = cv2.addWeighted(img, 0.3, np.full_like(img, 255), 0.7, 0)
         return img

@@ -41,7 +41,7 @@ from scripts.
 | Fist (hold) | Mute toggle |
 | Index finger pointing left / right (hold) | Previous / next browser tab |
 | Peace sign (hold) | Webcam selfie to `snaps/` |
-| Love-you sign | Hearts |
+| Love-you sign 🤟 (hold) | Play / pause whatever is playing (YouTube, Spotify, Music) |
 
 A gesture fires when the green bar under the banner fills (about 0.4 s).
 
