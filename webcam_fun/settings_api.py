@@ -12,13 +12,15 @@ from typing import Callable, Protocol
 from webcam_fun import settings as cfg
 from webcam_fun.identity import clean_name
 
-STATUSES = ("watching", "stopped", "starting", "camera blocked")
+STATUSES = ("watching", "stopped", "starting", "camera blocked", "no camera")
 GROUPS = {"features": tuple(cfg.FEATURES), "gestures": cfg.GESTURE_SWITCHES}
 FOLDERS = {"caught": "caught", "snaps": "snaps"}
 
 
 class Host(Protocol):
     def status(self) -> str: ...
+    def cameras(self) -> list[dict]: ...           # connected: [{id, name, built_in}]
+    def camera_in_use(self) -> str | None: ...     # unique ID, None while not watching
     def apply_settings(self, settings: cfg.Settings) -> None: ...
     def toggle_watching(self) -> None: ...
     def relearn_face(self) -> None: ...
@@ -28,6 +30,8 @@ class Host(Protocol):
 # What the window shows. Sections without items are custom pages drawn by the HTML.
 CATALOG = (
     {"id": "overview", "title": "Overview", "icon": "grid"},
+    {"id": "camera", "title": "Camera", "icon": "camera",
+     "subtitle": "Choose which camera Desk Guard watches with."},
     {"id": "security", "title": "Security", "icon": "shield",
      "subtitle": "Protect your screen when you step away or someone is watching.",
      "items": [
@@ -93,7 +97,7 @@ class SettingsApi:
 
     CALLABLE = frozenset({
         "get_state", "set_flag", "set_all", "set_group", "set_lock_after", "set_sensitivity",
-        "set_name", "toggle_watching", "relearn_face", "recalibrate_posture", "open_folder",
+        "set_name", "set_camera", "toggle_watching", "relearn_face", "recalibrate_posture", "open_folder",
         "open_log"})
 
     def __init__(self, settings_file: Path, root: Path, host: Host,
@@ -126,6 +130,10 @@ class SettingsApi:
             "sensitivity_levels": dict(cfg.SENSITIVITY),
             "name": settings.name,
             "status": status if status in STATUSES else "stopped",
+            "camera": settings.camera,
+            "camera_name": settings.camera_name,
+            "cameras": self._host.cameras(),
+            "camera_in_use": self._host.camera_in_use(),
             "catalog": CATALOG,
         }
 
@@ -167,6 +175,15 @@ class SettingsApi:
         if text and clean_name(text) != text:
             return _fail("Use plain letters, 20 characters at most.")
         return self._change(lambda s: s.with_name(text))
+
+    def set_camera(self, camera_id: str) -> dict:
+        """AUTO_CAMERA, or the ID of a connected camera (its name is saved alongside)."""
+        if camera_id == cfg.AUTO_CAMERA:
+            return self._change(lambda s: s.with_camera(cfg.AUTO_CAMERA))
+        names = {c["id"]: c["name"] for c in self._host.cameras()}
+        if camera_id not in names:
+            return _fail("That camera isn't connected.")
+        return self._change(lambda s: s.with_camera(camera_id, names[camera_id]))
 
     # ---------- actions ----------
     def toggle_watching(self) -> dict:

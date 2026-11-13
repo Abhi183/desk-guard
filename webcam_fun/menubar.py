@@ -31,6 +31,7 @@ from rumps import rumps as rumps_core
 from webcam_fun import macos
 from webcam_fun import settings as cfg
 from webcam_fun.dock import QUIT_ALL_REQUEST, use_desk_guard_icon
+from webcam_fun.cameras import describe, list_cameras
 from webcam_fun.engine import Watcher
 from webcam_fun.native_toast import Toasts
 from webcam_fun.recognition import forget_profile
@@ -52,9 +53,10 @@ CAMERA_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?P
 AV_NOT_DETERMINED, AV_AUTHORIZED = 0, 3
 AMBER, GREEN = "#f5a623", "#30a46c"
 STATUS_LINE = {"watching": "Watching", "starting": "Starting…", "stopped": "Stopped",
-               "camera blocked": "Camera not allowed"}
+               "camera blocked": "Camera not allowed", "no camera": "No camera connected"}
 VIDEO_MESSAGE = {"starting": "Starting camera…", "stopped": "Not watching",
-                 "camera blocked": "Desk Guard needs the camera. Allow it in System Settings."}
+                 "camera blocked": "Desk Guard needs the camera. Allow it in System Settings.",
+                 "no camera": "No camera connected"}
 
 START, STOP = "Start Watching", "Stop Watching"
 VIDEO = "Show Video Window"
@@ -116,7 +118,9 @@ class DeskGuard(rumps.App):
     def __init__(self) -> None:
         super().__init__("Desk Guard", title=ICON_OFF, quit_button=None)
         self.settings = cfg.load(SETTINGS_FILE)
-        self.watcher = Watcher(self.settings, on_status=self._status_from_watcher)
+        self.watcher = Watcher(self.settings, on_status=self._status_from_watcher,
+                               on_camera=lambda: AppHelper.callAfter(self._camera_changed))
+        self.known_cameras: list[dict] = []
         self.api = SettingsApi(SETTINGS_FILE, ROOT, host=self, opener=subprocess.Popen)
         self.state = "stopped"
         self.user_stopped = False
@@ -274,6 +278,7 @@ class DeskGuard(rumps.App):
             SHOW_REQUEST.unlink(missing_ok=True)
             self.open_settings()
         self._place_icon()
+        self._check_cameras()
         if self.start_pending and not self.user_stopped:
             self._start_watcher()
         if self.state == "camera blocked" and not self.user_stopped:
@@ -282,9 +287,30 @@ class DeskGuard(rumps.App):
                 self.retry_in = RETRY_S
                 self.start_watching()
 
+    def _check_cameras(self) -> None:
+        """Show cameras being plugged in or out in the settings window straight away."""
+        if self.panel is None or not self.panel.visible:
+            return
+        cameras = describe(list_cameras())
+        if cameras != self.known_cameras:
+            self.known_cameras = cameras
+            self.panel.push_state()
+
+    def _camera_changed(self) -> None:
+        if self.panel is not None:
+            self.panel.push_state()
+
     # ---------- the Host interface used by the settings window ----------
     def status(self) -> str:
         return self.state
+
+    def cameras(self) -> list[dict]:
+        self.known_cameras = describe(list_cameras())
+        return self.known_cameras
+
+    def camera_in_use(self) -> str | None:
+        camera = self.watcher.in_use
+        return camera.uid if camera is not None and self.state == "watching" else None
 
     def apply_settings(self, settings: cfg.Settings) -> None:
         self.settings = settings

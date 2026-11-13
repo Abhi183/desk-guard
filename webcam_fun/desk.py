@@ -161,6 +161,14 @@ class DeskApp:
             disabled={key for key in cfg.GESTURE_ACTIONS if not flags[key]},
             cursor=flags["cursor"], hold=cfg.SENSITIVITY[settings.sensitivity])
 
+    def camera_changed(self) -> None:
+        """A different camera sees you from a different angle and distance: start the
+        camera-specific state over. No lock until you have been seen through it."""
+        self.lock, self.lock_warned = AutoLock(self.args.lock_after), False
+        self.owner = OwnerTracker()
+        self.me_tracker = MeTracker()
+        self.posture.recalibrate()
+
     # ---------- events ----------
     @staticmethod
     def log(event: str) -> None:

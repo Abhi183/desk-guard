@@ -97,18 +97,43 @@ from webcam_fun import engine  # noqa: E402
 from webcam_fun import settings as cfg  # noqa: E402
 
 
-def _watcher(monkeypatch, statuses, camera=None):
+FACETIME = engine.Camera("builtin-1", "FaceTime HD Camera", True, 0)
+
+
+def _watcher(monkeypatch, statuses, camera=None, cameras=(FACETIME,)):
     monkeypatch.setattr(engine, "try_open_camera", lambda _index: camera)
+    monkeypatch.setattr(engine, "list_cameras", lambda: list(cameras))
     return engine.Watcher(cfg.Settings(), on_status=statuses.append)
 
 
-def test_no_camera_reports_blocked_and_ends(monkeypatch):
+def test_camera_that_gives_no_picture_reports_blocked_and_ends(monkeypatch):
     statuses = []
     w = _watcher(monkeypatch, statuses)
     assert w.start()
     w._thread.join(2)
     assert statuses == ["starting", "camera blocked"]
     assert not w.running
+
+
+def test_no_camera_connected_waits_instead_of_failing(monkeypatch):
+    statuses = []
+    w = _watcher(monkeypatch, statuses, cameras=())
+    assert w.start()
+    time.sleep(0.2)
+    assert statuses == ["starting", "no camera"] and w.running  # still waiting for one
+    w.stop()
+    assert statuses[-1] == "stopped" and not w.running
+
+
+def test_feed_opens_the_camera_by_its_current_number(monkeypatch):
+    opened = []
+    monkeypatch.setattr(engine, "try_open_camera",
+                        lambda index: opened.append(index) or FakeCapture(frames=3))
+    feed = engine._Feed()
+    usb = engine.Camera("usb-2", "Desk Camera", False, 1)
+    assert feed.open(usb) and feed.camera == usb and opened == [1]
+    feed.close()
+    assert feed.reader is None
 
 
 def test_a_finished_old_run_cannot_change_the_status(monkeypatch):

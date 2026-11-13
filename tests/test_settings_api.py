@@ -10,8 +10,18 @@ class FakeHost:
         self.calls = []
         self.current = "watching"
 
+    connected = [{"id": "builtin-1", "name": "FaceTime HD Camera", "built_in": True},
+                 {"id": "usb-2", "name": "Desk Camera", "built_in": False}]
+    using = "usb-2"
+
     def status(self):
         return self.current
+
+    def cameras(self):
+        return self.connected
+
+    def camera_in_use(self):
+        return self.using
 
     def apply_settings(self, settings):
         self.applied.append(settings)
@@ -118,3 +128,24 @@ def test_bridge_refuses_unknown_and_private_methods(api):
 def test_unknown_status_reads_as_stopped(api, host):
     host.current = "<script>"
     assert api.get_state()["status"] == "stopped"
+
+
+def test_state_lists_cameras_and_the_one_in_use(api):
+    state = api.get_state()
+    assert [c["name"] for c in state["cameras"]] == ["FaceTime HD Camera", "Desk Camera"]
+    assert state["camera"] == "auto" and state["camera_in_use"] == "usb-2"
+
+
+def test_pick_a_camera_saves_its_name_and_applies_live(api, host, tmp_path):
+    reply = api.set_camera("builtin-1")
+    assert reply["ok"]
+    assert (reply["state"]["camera"], reply["state"]["camera_name"]) == \
+        ("builtin-1", "FaceTime HD Camera")
+    assert host.applied[-1].camera == "builtin-1"
+    assert s.load(tmp_path / "settings.json").camera == "builtin-1"
+    assert api.set_camera("auto")["state"]["camera"] == "auto"
+
+
+def test_cannot_pick_a_camera_that_is_not_connected(api, host):
+    assert not api.set_camera("usb-404")["ok"]
+    assert host.applied == []

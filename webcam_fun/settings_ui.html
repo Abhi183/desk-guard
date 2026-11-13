@@ -136,6 +136,22 @@
   .bulk { display: flex; gap: 10px; }
   .bulk .btn { flex: 1; padding: 9px; }
 
+  /* camera picker */
+  .choice { cursor: default; }
+  .choice:hover { background: var(--hover); }
+  .choice.missing .title { color: var(--muted); }
+  .radio { width: 18px; height: 18px; border-radius: 50%; flex: none;
+           box-shadow: inset 0 0 0 1.5px var(--faint); display: grid; place-items: center; }
+  .choice.selected .radio { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .choice.selected .radio::after { content: ""; width: 9px; height: 9px; border-radius: 50%;
+                                   background: var(--accent); }
+  .choice:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: -3px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+           background: var(--green-soft); color: var(--green); white-space: nowrap; }
+  .row .cam-icon { width: 34px; height: 34px; border-radius: 8px; background: var(--hover);
+                   display: grid; place-items: center; flex: none; color: var(--muted); }
+  .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+
   /* identity */
   .field { display: flex; gap: 8px; }
   .field input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
@@ -180,10 +196,13 @@ const ICONS = {
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
   display: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
   folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
+  camera: '<rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.5l6-3.5v10l-6-3.5"/>',
+  laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
+  auto: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const STATUS_TEXT = { watching: "Watching", stopped: "Stopped", starting: "Starting…",
-                      "camera blocked": "Camera not allowed" };
+                      "camera blocked": "Camera not allowed", "no camera": "No camera" };
 const SENSITIVITY_NAMES = { fast: "Fast", normal: "Normal", careful: "Careful" };
 
 let state = null;
@@ -292,6 +311,10 @@ function groupButtons(group) {
           h("button", { class: "btn", onclick: () => change("set_group", group, false) }, "Disable all")];
 }
 function allKeys() { return state.catalog.flatMap((s) => (s.items || []).map((i) => i.key)).filter((k) => !DISPLAY_KEYS.has(k)); }
+function cameraInUseName() {
+  const c = (state.cameras || []).find((x) => x.id === state.camera_in_use);
+  return c ? c.name : null;
+}
 function countOn(keys) { return keys.filter((k) => state.flags[k]).length; }
 
 // ---------- pages ----------
@@ -307,8 +330,9 @@ const PAGES = {
       h("div", { class: "card hero" + (watching ? " watching" : "") },
         h("div", { class: "ring" }, icon("eye", 26)),
         h("div", {}, h("h3", {}, STATUS_TEXT[state.status] || "Stopped"),
-          h("p", {}, watching ? "The camera is on and protecting this Mac." :
+          h("p", {}, watching ? `Watching with ${cameraInUseName() || "the camera"}.` :
             state.status === "camera blocked" ? "Allow Desk Guard under Privacy & Security > Camera." :
+            state.status === "no camera" ? "Plug in a camera or open the lid; Desk Guard starts by itself." :
             "Desk Guard isn't watching right now.")),
         h("button", { class: "btn" + (watching ? " danger" : " primary"),
           onclick: () => call("toggle_watching").then((r) => r && r.ok && toast(watching ? "Stopping…" : "Starting…")) },
@@ -363,6 +387,41 @@ const PAGES = {
           seg(Object.entries(state.sensitivity_levels).map(([k, s]) => [k, `${SENSITIVITY_NAMES[k] || k} · ${s}s`]),
               state.sensitivity, (k) => change("set_sensitivity", k))),
         h("div", { class: "hint" }, "Careful avoids accidental triggers. Mute always needs at least 0.8 s.")));
+  },
+  camera() {
+    const sec = section("camera");
+    const inUse = state.camera_in_use;
+    const connected = state.cameras;
+    const pickedMissing = state.camera !== "auto" && !connected.some((c) => c.id === state.camera);
+    const choice = (id, iconName, title, detail, opts = {}) => {
+      const selected = state.camera === id;
+      const row = h("div", { class: "row choice" + (selected ? " selected" : "") + (opts.missing ? " missing" : ""),
+        role: "radio", "aria-checked": String(selected), tabindex: "0",
+        onclick: () => !selected && !opts.missing && change("set_camera", id),
+        onkeydown: (e) => (e.key === " " || e.key === "Enter") && !selected && !opts.missing && change("set_camera", id) },
+        h("div", { class: "cam-icon" }, icon(iconName, 18)),
+        h("div", { class: "text" }, h("div", { class: "title" }, title), h("div", { class: "detail" }, detail)),
+        opts.inUse ? h("span", { class: "badge" }, "In use") : null,
+        h("div", { class: "radio" }));
+      return row;
+    };
+    const autoDetail = "Uses an external camera when one is plugged in, otherwise the built-in camera." +
+      (state.camera === "auto" && cameraInUseName() ? ` Now: ${cameraInUseName()}.` : "");
+    const rows = [choice("auto", "auto", "Automatic", autoDetail)];
+    for (const c of connected) {
+      rows.push(choice(c.id, c.built_in ? "laptop" : "camera", c.name,
+        c.built_in ? "Built-in camera" : "External camera", { inUse: c.id === inUse }));
+    }
+    if (pickedMissing) {
+      rows.push(choice(state.camera, "camera", state.camera_name || "Your camera",
+        `Not connected. Using ${cameraInUseName() || "another camera"} until it's back.`, { missing: true }));
+    }
+    return h("div", { class: "page" }, head(sec),
+      h("div", { class: "label" }, "Watch with"),
+      h("div", { class: "card", role: "radiogroup", "aria-label": "Camera" },
+        connected.length || pickedMissing ? rows : [rows[0], h("div", { class: "empty" }, "No camera connected")]),
+      h("div", { class: "hint", style: "margin:10px 4px" },
+        "Changes apply instantly. If your camera is unplugged, Desk Guard switches to another one and comes back to yours when it's plugged in again."));
   },
   identity() {
     const sec = section("identity");

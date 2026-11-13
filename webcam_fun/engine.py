@@ -25,12 +25,14 @@ import numpy as np  # noqa: E402
 
 from webcam_fun import macos, personal  # noqa: E402
 from webcam_fun import settings as cfg  # noqa: E402
+from webcam_fun.cameras import Camera, choose, list_cameras  # noqa: E402
 from webcam_fun.desk import DeskApp, parse_args  # noqa: E402
 from webcam_fun.vision import try_open_camera  # noqa: E402
 
 FRAME_WAIT_S = 1.0          # no new frame for this long: the camera is gone (screen locked)
 RECONNECT_DELAY_S = 2.0
 FPS_REPORT_S = 60.0
+CAMERA_CHECK_S = 2.0        # how often to look for a better camera (plugged in, or picked)
 RESTART_DELAY_S = 2.0       # after a crash, wait this long before watching again
 MAX_CRASHES, CRASH_WINDOW_S = 3, 300.0
 GREEN_HEX = "#30a46c"
@@ -82,6 +84,30 @@ class LatestFrameCamera:
         self._thread.join(timeout)
 
 
+class _Feed:
+    """The camera one run is watching with. Can switch to another camera."""
+
+    def __init__(self) -> None:
+        self.reader: LatestFrameCamera | None = None
+        self.camera: Camera | None = None
+
+    def open(self, camera: Camera) -> bool:
+        """Open `camera` (closing nothing). False if it gives no picture."""
+        cap = try_open_camera(camera.index)
+        if cap is None:
+            return False
+        if not cap.read()[0]:
+            cap.release()
+            return False
+        self.reader, self.camera = LatestFrameCamera(cap), camera
+        return True
+
+    def close(self) -> None:
+        if self.reader is not None:
+            self.reader.close()
+        self.reader = None
+
+
 class _Run:
     """One start-to-stop of the watcher. A stopped run never comes back to life."""
 
@@ -94,9 +120,10 @@ class Watcher:
     """Owns the camera and the DeskApp. All public methods are safe to call from any thread."""
 
     def __init__(self, settings: cfg.Settings, on_status: Callable[[str], None],
-                 camera: int = 0) -> None:
+                 on_camera: Callable[[], None] = lambda: None) -> None:
         self._on_status = on_status
-        self._camera = camera
+        self._on_camera = on_camera  # the camera in use changed
+        self.in_use: Camera | None = None
         self._lock = threading.Lock()
         self._pending: cfg.Settings | None = settings
         self._latest_settings = settings
@@ -186,15 +213,25 @@ class Watcher:
                 if run.stop.wait(RESTART_DELAY_S):
                     return
 
+    def _wanted(self) -> str:
+        with self._lock:
+            return self._latest_settings.camera
+
+    def _use(self, feed: _Feed) -> None:
+        self.in_use = feed.camera
+        self._on_camera()
+
     def _watch(self, run: _Run) -> None:
         self._set_status(run, "starting")
-        cap = try_open_camera(self._camera)
-        if cap is None or not cap.read()[0]:
-            if cap is not None:
-                cap.release()
+        feed = _Feed()
+        pick = self._wait_for_a_camera(run)
+        if pick is None:
+            return  # stopped while waiting
+        if not feed.open(pick):
             self._set_status(run, "camera blocked")
             return
-        camera = LatestFrameCamera(cap)
+        log(f"watching with {pick.name}")
+        self._use(feed)
         app: DeskApp | None = None
         try:
             if run.stop.is_set():
@@ -203,16 +240,27 @@ class Watcher:
             if run.stop.is_set():
                 return
             self._set_status(run, "watching")
-            self._loop(run, app, camera)
+            self._loop(run, app, feed)
         finally:
             if app is not None:
                 try:
                     app.close()
                 except Exception as e:  # noqa: BLE001 - a broken model must not block stopping
                     log(f"could not close cleanly: {e!r}")
-            camera.close()
+            feed.close()
+            self.in_use = None
             if run.stop.is_set():
                 self._set_status(run, "stopped")
+
+    def _wait_for_a_camera(self, run: _Run) -> Camera | None:
+        """The camera to use, waiting (status "no camera") while none is connected."""
+        while not run.stop.is_set():
+            pick = choose(list_cameras(), self._wanted())
+            if pick is not None:
+                return pick
+            self._set_status(run, "no camera")
+            run.stop.wait(RECONNECT_DELAY_S)
+        return None
 
     def _make_app(self) -> DeskApp:
         with self._lock:
@@ -233,20 +281,29 @@ class Watcher:
             self._keys.clear()
             return pending, keys, self._render
 
-    def _loop(self, run: _Run, app: DeskApp, camera: LatestFrameCamera) -> None:
+    def _loop(self, run: _Run, app: DeskApp, feed: _Feed) -> None:
         seq, frames, since = 0, 0, time.monotonic()
+        next_check = time.monotonic() + CAMERA_CHECK_S
         while not run.stop.is_set():
             pending, keys, render = self._take_inputs()
             if pending is not None:
                 app.apply(pending)
+                next_check = 0.0  # the camera choice may have changed: look now
             now = time.monotonic()
             for code in keys:
                 app.handle_key(code, now)
-            frame, new_seq = camera.read(seq, FRAME_WAIT_S)
+            if now >= next_check:
+                next_check = now + CAMERA_CHECK_S
+                if self._switch_if_better(feed):
+                    app.camera_changed()
+                    seq = 0
+            frame, new_seq = feed.reader.read(seq, FRAME_WAIT_S)
             if frame is None:
-                camera = self._reconnect(run, camera)
-                if camera is None:
+                before = feed.camera
+                if not self._reconnect(run, feed):
                     return
+                if feed.camera != before:
+                    app.camera_changed()
                 seq = 0
                 continue
             seq = new_seq
@@ -262,18 +319,42 @@ class Watcher:
                 log(f"watching at {frames / (now - since):.0f} fps")
                 frames, since = 0, now
 
-    def _reconnect(self, run: _Run, camera: LatestFrameCamera) -> LatestFrameCamera | None:
-        """macOS cuts the camera while the screen is locked; wait for it to come back."""
-        camera.close()
-        log("camera feed lost (screen locked?), waiting for it to come back")
+    def _switch_if_better(self, feed: _Feed) -> bool:
+        """Move to the camera you picked (or the automatic choice) if it isn't the one in
+        use: it was just plugged back in, or you changed the setting. True if switched."""
+        best = choose(list_cameras(), self._wanted())
+        if best is None or feed.camera is None or best.uid == feed.camera.uid:
+            return False
+        old = feed.camera
+        feed.close()
+        if feed.open(best):
+            log(f"switched camera: {old.name} -> {best.name}")
+            self._use(feed)
+            return True
+        log(f"could not open {best.name}; staying with {old.name}")
+        current = choose(list_cameras(), old.uid)  # its number may have changed
+        if current is not None and feed.open(current):
+            return True
+        return False  # the next read fails and _reconnect takes over
+
+    def _reconnect(self, run: _Run, feed: _Feed) -> bool:
+        """The picture stopped: the camera was unplugged, or macOS paused it while the
+        screen is locked. Use the best camera available as soon as one gives a picture."""
+        lost = feed.camera.name if feed.camera else "camera"
+        feed.close()
+        log(f"{lost} stopped (unplugged, or screen locked); looking for a camera")
         while not run.stop.wait(RECONNECT_DELAY_S):
-            cap = try_open_camera(self._camera)
-            if cap is not None and cap.read()[0]:
-                log("camera back")
-                return LatestFrameCamera(cap)
-            if cap is not None:
-                cap.release()
-        return None
+            cameras = list_cameras()
+            if not cameras:
+                self._set_status(run, "no camera")
+                continue
+            pick = choose(cameras, self._wanted())
+            if pick is not None and feed.open(pick):
+                log(f"watching with {pick.name}")
+                self._use(feed)
+                self._set_status(run, "watching")
+                return True
+        return False
 
 
 def log(event: str) -> None:

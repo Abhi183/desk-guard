@@ -133,6 +133,10 @@ Settings apply instantly, with nothing restarted, and are saved to `menubar_sett
 window, clicking the Dock icon, or Settings... in the eye menu.
 
 - Overview: status with start/stop, Enable all / Disable all features, a switch for each
+- Camera: Automatic (an external camera if one is plugged in, else the built-in one) or a
+  specific camera. Your pick is saved by its macOS device ID, so it survives unplugging:
+  while it is gone Desk Guard uses another camera, and switches back within about 2 s of
+  it returning. After a switch, posture and the auto-lock start fresh for the new view.
 - Security: auto-lock with lock delay (2/5/10/30 s), shoulder-surfer alarm, close personal
   apps with company
 - Wellbeing: posture alerts, sounds, recalibrate posture
@@ -185,6 +189,7 @@ features, settings, quit. Cmd-Q quits from anywhere in the app.
 
 - `webcam_fun/menubar.py` the app: menus, windows, camera permission, Dock
 - `webcam_fun/engine.py` watcher threads: newest-frame camera reader, DeskApp loop
+- `webcam_fun/cameras.py` lists cameras and picks the one to use (unit tested)
 - `webcam_fun/desk.py` DeskApp (faces, lock, posture, gestures) and the Terminal version
   with an OpenCV window (`./run desk`)
 - `webcam_fun/video_window.py`, `settings_panel.py`, `native_toast.py` AppKit windows
