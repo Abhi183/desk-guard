@@ -10,6 +10,9 @@ __pycache__/
 caught/
 snaps/
 
+# Your face profile (biometric data): never commit
+face_profile.npy
+
 # Local runtime state
 desk.log
 menubar_settings.json
@@ -19,3 +22,7 @@ menubar_settings.json
 
 # Built locally by tools/make_app.sh (contains your home path)
 Desk Guard.app/
+
+# Downloaded on first run by ./run (too big for git)
+models/face_recognition_sface_2021dec.onnx
+models/selfie_segmenter.tflite

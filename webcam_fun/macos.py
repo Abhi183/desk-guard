@@ -3,6 +3,7 @@
 import ctypes
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +111,79 @@ def play_pause() -> bool:
     fallback because no AppleScript reaches every player.
     """
     return _press_media_key(NX_KEYTYPE_PLAY)
+
+
+def mouse_position() -> tuple[float, float] | None:
+    """Where the pointer is, in screen points (origin top-left of the main display)."""
+    try:
+        import Quartz
+    except ImportError:
+        return None
+    location = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    return (location.x, location.y)
+
+
+def desktop_bounds() -> tuple[float, float, float, float] | None:
+    """(left, top, right, bottom) of the box around all displays, in screen points."""
+    try:
+        import Quartz
+    except ImportError:
+        return None
+    error, displays, _count = Quartz.CGGetActiveDisplayList(16, None, None)
+    if error or not displays:
+        return None
+    rects = [Quartz.CGDisplayBounds(d) for d in displays]
+    return (min(r.origin.x for r in rects), min(r.origin.y for r in rects),
+            max(r.origin.x + r.size.width for r in rects),
+            max(r.origin.y + r.size.height for r in rects))
+
+
+CLICK_PRESS_S = 0.015  # how long the button stays down
+
+
+def _post_mouse(kinds: tuple, position: tuple[float, float], button: int,
+                click: bool = False) -> bool:
+    """Post mouse events. False when this process may not (no Accessibility permission).
+
+    For a click the events carry click count 1 and the button is held for a moment.
+    Without the count, apps receive a "click number zero" and buttons and links ignore
+    it (context menus don't check, which is why only right-click used to work).
+    """
+    try:
+        import Quartz
+    except ImportError:
+        return False
+    if not Quartz.CGPreflightPostEventAccess():
+        return False
+    for i, kind in enumerate(kinds):
+        if click and i:
+            time.sleep(CLICK_PRESS_S)
+        event = Quartz.CGEventCreateMouseEvent(None, kind, position, button)
+        if click:
+            Quartz.CGEventSetIntegerValueField(event, Quartz.kCGMouseEventClickState, 1)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    return True
+
+
+def move_mouse(position: tuple[float, float]) -> bool:
+    try:
+        import Quartz
+    except ImportError:
+        return False
+    return _post_mouse((Quartz.kCGEventMouseMoved,), position, Quartz.kCGMouseButtonLeft)
+
+
+def click_mouse(position: tuple[float, float], right: bool = False) -> bool:
+    """Press and release a mouse button at `position`."""
+    try:
+        import Quartz
+    except ImportError:
+        return False
+    if right:
+        return _post_mouse((Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp),
+                           position, Quartz.kCGMouseButtonRight, click=True)
+    return _post_mouse((Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp),
+                       position, Quartz.kCGMouseButtonLeft, click=True)
 
 
 def keystroke(script_body: str) -> str | None:

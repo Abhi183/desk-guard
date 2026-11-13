@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import numpy as np
@@ -9,9 +10,16 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 FACE_MODEL = MODELS / "face_detection_yunet.onnx"
+FACE_ID_MODEL = MODELS / "face_recognition_sface_2021dec.onnx"
 GESTURE_MODEL = MODELS / "gesture_recognizer.task"
+BODY_MODEL = MODELS / "selfie_segmenter.tflite"
 
 Box = tuple[int, int, int, int]  # x, y, w, h
+
+
+class Face(NamedTuple):
+    box: Box
+    row: np.ndarray  # raw YuNet row (box, 5 landmarks, score); face recognition aligns with it
 
 
 def try_open_camera(index: int = 0, width: int = 640,
@@ -40,22 +48,25 @@ def require_model(path: Path) -> Path:
 
 
 class FaceDetector:
-    """YuNet face detector. detect() returns boxes, largest first."""
+    """YuNet face detector. Results come largest face first."""
 
     def __init__(self, score_threshold: float = 0.75, min_face_px: int = 18) -> None:
         self._net = cv2.FaceDetectorYN.create(
             str(require_model(FACE_MODEL)), "", (320, 240), score_threshold)
         self._min_face_px = min_face_px
 
-    def detect(self, frame: np.ndarray) -> list[Box]:
+    def detect_faces(self, frame: np.ndarray) -> list[Face]:
         h, w = frame.shape[:2]
         self._net.setInputSize((w, h))
-        _, faces = self._net.detect(frame)
-        if faces is None:
+        _, rows = self._net.detect(frame)
+        if rows is None:
             return []
-        boxes = [tuple(int(v) for v in f[:4]) for f in faces
-                 if min(f[2], f[3]) >= self._min_face_px]
-        return sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+        faces = [Face(tuple(int(v) for v in row[:4]), row) for row in rows
+                 if min(row[2], row[3]) >= self._min_face_px]
+        return sorted(faces, key=lambda f: f.box[2] * f.box[3], reverse=True)
+
+    def detect(self, frame: np.ndarray) -> list[Box]:
+        return [face.box for face in self.detect_faces(frame)]
 
 
 def put_text(img: np.ndarray, text: str, org: tuple[int, int], color: tuple,

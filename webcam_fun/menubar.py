@@ -12,6 +12,8 @@ from rumps import rumps as rumps_core
 
 from webcam_fun import macos
 from webcam_fun.dock import QUIT_ALL_REQUEST, hide_from_dock
+from webcam_fun.identity import clean_name
+from webcam_fun.recognition import forget_profile
 from webcam_fun.vision import ROOT
 
 SETTINGS_FILE = ROOT / "menubar_settings.json"
@@ -19,7 +21,8 @@ LOG_FILE = ROOT / "desk.log"
 LOCK_FILE = ROOT / ".menubar.lock"
 SHOW_REQUEST = ROOT / ".show_request"  # touched by a second launch of the app
 CAUGHT_DIR = ROOT / "caught"
-DEFAULT_SETTINGS = {"show_video": True, "auto_lock": True, "posture": True, "gestures": True}
+DEFAULT_SETTINGS = {"show_video": True, "auto_lock": True, "posture": True, "gestures": True,
+                    "privacy": True, "cursor": True}
 ICON_ON, ICON_OFF = "👁", "◌"
 POLL_S = 2
 RETRY_S = 6
@@ -32,7 +35,12 @@ CAMERA_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?P
 
 START, STOP = "Start watching", "Stop watching"
 VIDEO, LOCK, POSTURE = "Show video window", "Lock when I leave", "Posture alerts"
-GESTURES = "Gesture control"
+GESTURES = "Gesture control (only you)"
+PRIVACY = "Close personal apps when someone sits with me"
+CURSOR = "Hand moves the pointer (point up)"
+RELEARN = "Relearn my face"
+OPTION_KEYS = {VIDEO: "show_video", LOCK: "auto_lock", POSTURE: "posture", GESTURES: "gestures",
+               CURSOR: "cursor", PRIVACY: "privacy"}
 CAUGHT, LOG, QUIT = "Open caught photos", "Open log", "Quit Desk Guard"
 
 
@@ -44,9 +52,18 @@ def load_settings() -> dict:
     return {k: bool(saved.get(k, v)) for k, v in DEFAULT_SETTINGS.items()}
 
 
+def load_name() -> str:
+    """Your name from the "name" entry in the settings file; "you" when it isn't set."""
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text())
+    except (OSError, ValueError):
+        return clean_name(None)
+    return clean_name(saved.get("name") if isinstance(saved, dict) else None)
+
+
 def save_settings(settings: dict) -> None:
     try:
-        SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+        SETTINGS_FILE.write_text(json.dumps({**settings, "name": load_name()}, indent=2))
     except OSError as e:
         print(f"could not save settings: {e}", file=sys.stderr)
 
@@ -84,8 +101,9 @@ class DeskGuardMenu(rumps.App):
         self.status = rumps.MenuItem("Stopped")
         self.toggle = rumps.MenuItem(START, callback=self.on_toggle)
         self.items = {name: rumps.MenuItem(name, callback=self.on_option)
-                      for name in (VIDEO, LOCK, POSTURE, GESTURES)}
-        self.menu = [self.status, self.toggle, None, *self.items.values(), None,
+                      for name in OPTION_KEYS}
+        self.menu = [self.status, self.toggle, None, *self.items.values(),
+                     rumps.MenuItem(RELEARN, callback=self.on_relearn), None,
                      rumps.MenuItem(CAUGHT, callback=self.on_caught),
                      rumps.MenuItem(LOG, callback=self.on_log), None,
                      rumps.MenuItem(QUIT, callback=self.on_quit)]
@@ -99,7 +117,7 @@ class DeskGuardMenu(rumps.App):
         return self.child is not None and self.child.poll() is None
 
     def command(self) -> list[str]:
-        cmd = [sys.executable, "-m", "webcam_fun.desk"]
+        cmd = [sys.executable, "-m", "webcam_fun.desk", "--name", load_name()]
         if not self.settings["show_video"]:
             cmd.append("--no-window")
         if not self.settings["auto_lock"]:
@@ -108,6 +126,10 @@ class DeskGuardMenu(rumps.App):
             cmd.append("--no-posture")
         if not self.settings["gestures"]:
             cmd.append("--no-gestures")
+        if not self.settings["privacy"]:
+            cmd.append("--no-privacy")
+        if not self.settings["cursor"]:
+            cmd.append("--no-cursor")
         return cmd
 
     def start(self) -> None:
@@ -133,14 +155,28 @@ class DeskGuardMenu(rumps.App):
         self.stop() if self.running() else self.start()
 
     def on_option(self, sender: rumps.MenuItem) -> None:
-        key = {VIDEO: "show_video", LOCK: "auto_lock", POSTURE: "posture",
-               GESTURES: "gestures"}[sender.title]
+        key = OPTION_KEYS[sender.title]
         self.settings = {**self.settings, key: not self.settings[key]}
         save_settings(self.settings)
         self._sync_checkmarks()
         if self.running():  # options are command-line flags, so restart to apply
             self.stop()
             self.start()
+
+    def on_relearn(self, _) -> None:
+        """Forget the saved face; the watcher learns it again as soon as it sees one face."""
+        was_running = self.running()
+        self.stop()
+        try:
+            forget_profile()
+        except OSError as e:
+            macos.popup("Desk Guard", f"Could not forget the saved face: {e}", "#f5a623")
+            return
+        finally:
+            if was_running:
+                self.start()
+        macos.popup("Desk Guard", "Look at the camera on your own for a few seconds so I can "
+                    "learn your face.", "#30a46c")
 
     def on_caught(self, _) -> None:
         CAUGHT_DIR.mkdir(exist_ok=True)
@@ -205,10 +241,8 @@ class DeskGuardMenu(rumps.App):
                     "#30a46c")
 
     def _sync_checkmarks(self) -> None:
-        self.items[VIDEO].state = self.settings["show_video"]
-        self.items[LOCK].state = self.settings["auto_lock"]
-        self.items[POSTURE].state = self.settings["posture"]
-        self.items[GESTURES].state = self.settings["gestures"]
+        for title, key in OPTION_KEYS.items():
+            self.items[title].state = self.settings[key]
 
     def _refresh(self) -> None:
         on = self.running()

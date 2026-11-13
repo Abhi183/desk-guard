@@ -1,23 +1,37 @@
 """Desk monitor: shoulder-surfer alarm, auto-lock when you leave, posture nudges,
-and hand-gesture control, all from one camera feed.
+hand-gesture control that only obeys you, and closing personal apps when someone
+sits down with you, all from one camera feed.
 
 Keys: q quit  m mute  t always-on-top  c recalibrate posture  l lock on/off  g gestures on/off
+      f relearn my face
 """
 
 import argparse
+import threading
 import time
 
 import cv2
 import numpy as np
 
-from webcam_fun import macos
+from webcam_fun import macos, personal
+from webcam_fun.body import BODY_MIN_SHARE, BodyDetector
 from webcam_fun.dock import QUIT_ALL_REQUEST, on_dock_quit, use_desk_guard_icon
 from webcam_fun.gestures import GestureApp, GestureEngine
+from webcam_fun.identity import (
+    CompanyWatch,
+    MeTracker,
+    OwnerTracker,
+    clean_name,
+    hand_owner,
+    has_company,
+)
 from webcam_fun.posture import PostureJudge
 from webcam_fun.presence import AutoLock
+from webcam_fun.recognition import FaceId
 from webcam_fun.vision import (
     ROOT,
     Box,
+    Face,
     FaceDetector,
     open_camera,
     put_text,
@@ -32,6 +46,8 @@ AMBER_HEX, GREEN_HEX = "#f5a623", "#30a46c"  # pop-up accent colors
 LOCK_WARNING_S = 5     # heads-up notification, only used when --lock-after is longer
 DEFAULT_LOCK_AFTER_S = 2  # short grace so one missed frame or a glance away doesn't lock
 MIN_LOCK_AFTER_S = 1
+DEFAULT_COMPANY_AFTER_S = 8  # someone sitting with you this long closes personal apps
+MIN_COMPANY_AFTER_S = 1
 RECONNECT_DELAY_S = 2
 WINDOW_SIZE = (480, 360)
 POSTURE_TEXT = {"good": "posture ok", "too_close": "too close to the screen",
@@ -54,10 +70,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-gestures", action="store_true", help="disable hand-gesture control")
     p.add_argument("--no-keys", action="store_true",
                    help="gestures: don't switch tabs when pointing")
+    p.add_argument("--no-cursor", action="store_true",
+                   help="gestures: don't let a raised index finger take the mouse pointer")
+    p.add_argument("--no-privacy", action="store_true",
+                   help="don't close personal apps when someone sits with you")
+    p.add_argument("--company-after", type=float, default=DEFAULT_COMPANY_AFTER_S,
+                   help="seconds someone sits with you before personal apps close (default 8)")
+    p.add_argument("--name", default="you",
+                   help="what to call you on the box around your face (default: you)")
     p.add_argument("--camera", type=int, default=0)
     args = p.parse_args()
+    args.name = clean_name(args.name)
     if args.lock_after < MIN_LOCK_AFTER_S:
         p.error(f"--lock-after must be at least {MIN_LOCK_AFTER_S} second")
+    if args.company_after < MIN_COMPANY_AFTER_S:
+        p.error(f"--company-after must be at least {MIN_COMPANY_AFTER_S} second")
     return args
 
 
@@ -77,10 +104,18 @@ class DeskApp:
         self.message, self.message_until = "", 0.0
         self.posture_status = "calibrating"
         self.gestures_enabled = not args.no_gestures
-        self.gesture_app = GestureApp(argparse.Namespace(no_keys=args.no_keys))
+        self.gesture_app = GestureApp(argparse.Namespace(no_keys=args.no_keys,
+                                                         no_cursor=args.no_cursor))
         self.gesture_engine: GestureEngine | None = None
         self.gesture_result = None
         self.quit_requested = False
+        self.face_id = FaceId(self.on_face_learned)
+        self.me_tracker = MeTracker()
+        self.me: int | None = None  # index of your face in this frame's face list
+        self.company = CompanyWatch(args.company_after)
+        self.owner = OwnerTracker()
+        self.body: BodyDetector | None = None  # loaded the first time your face is hidden
+        self.body_share: float | None = None   # last body check, for the status line
 
     # ---------- events ----------
     @staticmethod
@@ -113,13 +148,14 @@ class DeskApp:
         cv2.imwrite(str(CAUGHT_DIR / time.strftime("caught_%Y%m%d_%H%M%S.jpg")), frame)
         self.caught += 1
 
-    def on_away(self, now: float) -> None:
+    def on_away(self, now: float, stranger: bool) -> None:
+        reason = "unrecognised face" if stranger else "away"
         if self.args.dry_run:
-            self.log("would lock (dry run)")
+            self.log(f"{reason} -> would lock (dry run)")
             self.say("would lock now (dry run)", now)
             return
         result = macos.lock_screen()
-        self.log(f"away -> screen {result}")
+        self.log(f"{reason} -> screen {result}")
         self.say(f"screen {result}", now)
 
     def check_lock_warning(self, now: float) -> None:
@@ -135,6 +171,38 @@ class DeskApp:
             if not self.muted:
                 macos.play_sound("/System/Library/Sounds/Pop.aiff")
 
+    def on_face_learned(self, error: str | None) -> None:
+        if error:
+            self.log(error)
+            macos.alert("Desk Guard", "Face not saved", "I will have to learn it again next time",
+                        AMBER_HEX)
+            return
+        self.log("learned your face")
+        macos.alert("Desk Guard", "I know your face now",
+                    "Gestures only work for you. Press f in the video window to relearn",
+                    GREEN_HEX)
+
+    def on_company(self, now: float) -> None:
+        if self.args.dry_run:
+            self.log("would close personal apps (dry run)")
+            self.say("would close personal apps now (dry run)", now)
+            return
+        self.say("company: closing personal apps", now)
+        # Closing browser tabs waits on AppleScript, so keep it off the camera loop.
+        threading.Thread(target=self._close_personal, daemon=True).start()
+
+    def _close_personal(self) -> None:
+        apps = personal.quit_personal_apps()
+        tabs, errors = personal.close_personal_tabs()
+        for error in errors:
+            self.log(f"company: could not close tabs: {error}")
+        closed = [*apps, *([f"{tabs} browser tab{'s' if tabs != 1 else ''}"] if tabs else [])]
+        if not closed:
+            self.log("company: nothing personal was open")
+            return
+        self.log(f"company: closed {', '.join(closed)}")
+        macos.alert("Desk Guard", "Company", f"Closed {', '.join(closed)}", AMBER_HEX)
+
     def on_bad_posture(self, status: str) -> None:
         text = "Sit back a bit" if status == "too_close" else "Sit up straight"
         self.log(f"posture: {status}")
@@ -144,15 +212,22 @@ class DeskApp:
 
     # ---------- per frame ----------
     def step(self, frame: np.ndarray, now: float) -> list[Box]:
-        faces = self.detector.detect(frame)
+        detected: list[Face] = self.detector.detect_faces(frame)
+        faces = [face.box for face in detected]
+        self.me = self.face_id.identify(frame, detected, now)
         if not self.args.no_guard and self.watch.update(len(faces) > 1):
             self.on_intruder(frame, now)
+        if not self.args.no_privacy and self.company.update(has_company(faces), now):
+            self.on_company(now)
         if self.lock_enabled:
-            if self.lock.update(bool(faces), now):
-                self.on_away(now)
+            if self.lock.update(self._owner_at_desk(frame, faces, now), now):
+                self.on_away(now, stranger=bool(faces))
             self.check_lock_warning(now)
         if not self.args.no_posture:
-            main_face = faces[0] if faces else None
+            if self.me is not None:
+                main_face = faces[self.me]
+            else:  # a lone face that doesn't match is most likely you with your head turned
+                main_face = faces[0] if len(faces) == 1 else None
             was_calibrated = self.posture.calibrated
             self.posture_status, alert = self.posture.update(main_face, frame.shape[0], now)
             if alert:
@@ -161,21 +236,55 @@ class DeskApp:
                 macos.alert("Desk Guard", "Posture saved",
                             "This is your good posture. I will nudge you if you drift",
                             GREEN_HEX)
-        self._step_gestures(frame, now)
+        self._step_gestures(frame, faces, now)
         return faces
 
-    def _step_gestures(self, frame: np.ndarray, now: float) -> None:
+    def _owner_at_desk(self, frame: np.ndarray, faces: list[Box], now: float) -> bool:
+        """You, physically at the desk: your face, or failing that your body in your spot."""
+        self.body_share = None
+        if self.face_id.learning:
+            return bool(faces)  # nobody to recognise yet: any face keeps it unlocked
+        my_face = faces[self.me] if self.me is not None else None
+        zone = self.owner.zone(frame.shape[1], frame.shape[0])
+        if my_face is None and zone is not None:
+            if self.body is None:
+                self.body = BodyDetector()
+            self.body_share = self.body.body_share(frame, zone)
+        body_there = self.body_share is not None and self.body_share >= BODY_MIN_SHARE
+        return self.owner.update(my_face, faces, body_there, now)
+
+    def _step_gestures(self, frame: np.ndarray, faces: list[Box], now: float) -> None:
+        my_box = self.me_tracker.update(faces[self.me] if self.me is not None else None, now)
         if not self.gestures_enabled:
             self.gesture_result = None
             return
         if self.gesture_engine is None:
             self.gesture_engine = GestureEngine()  # loaded on first use (~1s)
         self.gesture_result = self.gesture_engine.process(frame, now)
-        self.gesture_app.step(self.gesture_result, frame, now)
+        hand = self._my_hand(self.gesture_result, faces, my_box, frame.shape)
+        self.gesture_app.step(self.gesture_result, frame, now, hand=hand)
+
+    def _my_hand(self, result, faces: list[Box], my_box: Box | None,
+                 frame_shape: tuple) -> int | None:
+        """Which of the hands in view is yours: the one nearer your face than anyone else's."""
+        if my_box is None:
+            return None  # you are not in the frame, so nobody gets to gesture
+        if self.me is not None:
+            boxes, mine = faces, self.me
+        else:  # your face is covered this frame (often by the hand): use where it just was
+            boxes, mine = [*faces, my_box], len(faces)
+        h, w = frame_shape[:2]
+        for i, landmarks in enumerate(result.hand_landmarks):
+            wrist = (landmarks[0].x * w, landmarks[0].y * h)
+            if hand_owner(wrist, boxes) == mine:
+                return i
+        return None
 
     def close(self) -> None:
         if self.gesture_engine is not None:
             self.gesture_engine.close()
+        if self.body is not None:
+            self.body.close()
 
     def handle_key(self, key: int, now: float) -> bool:
         """Returns False when the app should quit."""
@@ -197,15 +306,19 @@ class DeskApp:
         elif key == ord("g"):
             self.gestures_enabled = not self.gestures_enabled
             self.say(f"gestures {'on' if self.gestures_enabled else 'off'}", now)
+        elif key == ord("f"):
+            self.face_id.relearn()
+            self.log("relearning your face")
+            self.say("relearning your face, look at the camera alone", now)
         return True
 
     # ---------- drawing ----------
     def render(self, frame: np.ndarray, faces: list[Box], now: float) -> np.ndarray:
         img = frame.copy()
         for i, (x, y, w, h) in enumerate(faces):
-            color = GREEN if i == 0 else RED
+            label, color = self._face_label(i, len(faces))
             cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-            put_text(img, "you" if i == 0 else "WHO'S THIS?", (x, max(y - 8, 92)), color)
+            put_text(img, label, (x, max(y - 8, 92)), color)
         if self.gesture_result is not None:
             img = self.gesture_app.draw_effects(img, self.gesture_result, now)
         self._draw_banner(img, faces, now)
@@ -214,14 +327,25 @@ class DeskApp:
         self._draw_status(img, now)
         return img
 
+    def _face_label(self, index: int, face_count: int) -> tuple[str, tuple]:
+        if not self.face_id.is_you(index):
+            return ("WHO'S THIS?", RED) if face_count > 1 else ("not recognised", RED)
+        if self.face_id.learning:
+            return f"learning your face {self.face_id.progress:.0%}", AMBER
+        return self.args.name, GREEN
+
     def _draw_banner(self, img: np.ndarray, faces: list[Box], now: float) -> None:
         left = self.lock.seconds_left(now) if self.lock_enabled else None
+        company_left = None if self.args.no_privacy else self.company.seconds_left(now)
         if self.watch.alarm and not self.args.no_guard:
             if int(now * 4) % 2 == 0:
                 cv2.rectangle(img, (0, 0), (img.shape[1] - 1, img.shape[0] - 1), RED, 18)
             text, color = "SOMEONE IS BEHIND YOU", RED
+        elif company_left is not None:
+            text, color = f"Company: closing personal apps in {company_left:0.0f}s", AMBER
         elif left is not None:
-            text, color = f"Locking in {left:0.0f}s", AMBER
+            who = f"Not {self.args.name}: locking" if faces else "Locking"
+            text, color = f"{who} in {left:0.0f}s", AMBER
         elif not faces:
             text, color = "No one at the desk", GRAY
         else:
@@ -234,6 +358,9 @@ class DeskApp:
         lines = []
         if not self.args.no_posture:
             lines.append(POSTURE_TEXT.get(self.posture_status, self.posture_status))
+        if self.body_share is not None:  # your face is hidden: lock goes by your body
+            lines.append(f"face hidden, body in your spot: {self.body_share:.0%} "
+                         f"(needs {BODY_MIN_SHARE:.0%})")
         if self.message and now < self.message_until:
             lines.append(self.message)
         gesture_message = self.gesture_app.message_now(now) if self.gestures_enabled else None
@@ -241,7 +368,7 @@ class DeskApp:
             lines.append(gesture_message)
         lock = "off" if not self.lock_enabled else f"{self.args.lock_after:g}s"
         lines.append(f"caught {self.caught} | lock {lock} | sound {'off' if self.muted else 'on'}"
-                     " | q m t c l g")
+                     " | q m t c l g f")
         for i, line in enumerate(reversed(lines)):
             put_text(img, line, (10, h - 12 - i * 22), WHITE, scale=0.5, thickness=1)
 
@@ -297,6 +424,8 @@ def main() -> None:
         cv2.waitKey(1)
         show_window_up_front()
         on_dock_quit(lambda: app.request_quit_all("Quit from the Dock"))
+    if not args.no_privacy and not args.dry_run:
+        personal.ask_tab_permission()
     macos.alert("Desk Guard", "Watching", "Sit normally for a moment so I can learn your posture",
                 GREEN_HEX)
     try:

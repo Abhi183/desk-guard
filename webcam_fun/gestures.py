@@ -5,6 +5,9 @@
   peace sign (hold)         take a webcam selfie
   love-you sign (hold)      play / pause media (YouTube, Spotify, Music...)
   point left / right (hold)  previous / next browser tab (needs Accessibility)
+  point up (hold)           take the mouse pointer: it follows your hand. Then pinch thumb
+                            and index, or hold an open palm, to click; fist to lift the
+                            mouse; lower the hand to let go (needs Accessibility)
 
 Keys: q quit
 """
@@ -17,16 +20,27 @@ import mediapipe as mp
 import numpy as np
 
 from webcam_fun import macos
+from webcam_fun.cursor import (
+    INDEX_MCP,
+    CursorDriver,
+    CursorMode,
+    CursorStep,
+    pinch_ratio,
+)
 from webcam_fun.gesture_trigger import HoldTrigger
 from webcam_fun.pointing import classify_point
 from webcam_fun.vision import GESTURE_MODEL, ROOT, open_camera, put_text, require_model
 
 WINDOW = "Gestures"
+MAX_HANDS = 2  # so a visitor's hand in view doesn't hide yours from the recognizer
 SNAP_DIR = ROOT / "snaps"
 WHITE, CYAN, GREEN = (255, 255, 255), (255, 220, 0), (80, 200, 80)
 LABELS = {"Thumb_Up": "volume up", "Thumb_Down": "volume down", "Closed_Fist": "mute",
           "Victory": "selfie", "ILoveYou": "play / pause", "Point_Right": "next tab",
-          "Point_Left": "previous tab", "Pointing_Up": "point left or right instead"}
+          "Point_Left": "previous tab", "Pointing_Up": "hold to take the pointer"}
+CURSOR_HELP = "pointer: pinch or open palm = click | fist = lift | lower hand = stop"
+CURSOR_LIFTED = "pointer lifted: move your hand, then point again"
+NO_MOUSE_ACCESS = "pointer blocked: allow Desk Guard / Python in Accessibility"
 HAND_CONNECTIONS = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
                     (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15),
                     (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17))
@@ -36,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--no-keys", action="store_true", help="don't switch tabs when pointing")
+    p.add_argument("--no-cursor", action="store_true",
+                   help="don't let a raised index finger take the mouse pointer")
     p.add_argument("--camera", type=int, default=0)
     return p.parse_args()
 
@@ -45,7 +61,7 @@ def make_recognizer():
     options = vision.GestureRecognizerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=str(require_model(GESTURE_MODEL))),
         running_mode=vision.RunningMode.VIDEO,
-        num_hands=1,
+        num_hands=MAX_HANDS,
         min_hand_detection_confidence=0.6,
     )
     return vision.GestureRecognizer.create_from_options(options)
@@ -63,9 +79,14 @@ def draw_hand(img: np.ndarray, landmarks) -> None:
 class GestureApp:
     def __init__(self, args: argparse.Namespace) -> None:
         self.send_keys = not args.no_keys
+        self.cursor_enabled = not getattr(args, "no_cursor", False)
+        self.cursor_mode = CursorMode()
+        self.cursor_driver = CursorDriver()
+        self.cursor_lifted = False
         self.trigger = HoldTrigger(hold_s=0.4, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4})
         self.flash_until = 0.0
         self.message, self.message_until = "", 0.0
+        self.ignoring_hand = False  # a hand is in view but it isn't yours
 
     def say(self, text: str, now: float) -> None:
         self.message, self.message_until = text, now + 2.5
@@ -107,24 +128,62 @@ class GestureApp:
         error = macos.next_tab() if to_right else macos.previous_tab()
         self.say(error or label, now)
 
-    def step(self, result, frame: np.ndarray, now: float) -> str | None:
-        gesture = None
-        if result.gestures:
-            gesture = result.gestures[0][0].category_name
-        if result.hand_landmarks:  # sideways pointing isn't a built-in gesture
-            pointing = classify_point([(lm.x, lm.y) for lm in result.hand_landmarks[0]])
-            gesture = pointing or gesture
+    def step(self, result, frame: np.ndarray, now: float, hand: int | None = 0) -> str | None:
+        """Act on the gesture of hand number `hand`; None means no hand in view is yours."""
+        gesture, points = None, None
+        self.ignoring_hand = hand is None and bool(result.hand_landmarks)
+        if hand is not None and hand < len(result.gestures) and result.gestures[hand]:
+            gesture = result.gestures[hand][0].category_name
+        if hand is not None and hand < len(result.hand_landmarks):
+            points = [(lm.x, lm.y) for lm in result.hand_landmarks[hand]]
+        if self.cursor_enabled and self._step_cursor(gesture, points, now):
+            self.trigger.update(None, now)  # other gestures are off while you hold the pointer
+            return gesture
+        if points is not None:  # sideways pointing isn't a built-in gesture
+            gesture = classify_point(points) or gesture
         fired = self.trigger.update(gesture, now)
         if fired:
             self.act(fired, frame, now)
         return gesture
 
+    def _step_cursor(self, gesture: str | None, points: list | None, now: float) -> bool:
+        """Pointer control for this frame. True while your hand holds the pointer."""
+        step = self.cursor_mode.update(gesture, pinch_ratio(points) if points else None, now)
+        if step.left:
+            self.say("pointer released", now)
+        if not step.active or points is None:
+            return step.active
+        knuckle = points[INDEX_MCP]  # steadier than the fingertip, and it stays put in a pinch
+        if step.entered:
+            self.cursor_driver.start(knuckle, macos.mouse_position() or (0.0, 0.0), now)
+            self.say("pointer taken", now)
+        self._apply_cursor(step, knuckle, now)
+        return True
+
+    def _apply_cursor(self, step: CursorStep, knuckle: tuple[float, float], now: float) -> None:
+        position = macos.mouse_position()
+        bounds = macos.desktop_bounds()
+        if position is None or bounds is None:
+            return
+        self.cursor_driver.sync(position)
+        self.cursor_lifted = step.lifted
+        if not step.move:
+            self.cursor_driver.hold(knuckle, now)
+        elif not macos.move_mouse(self.cursor_driver.move(knuckle, bounds, now)):
+            self.say(NO_MOUSE_ACCESS, now)
+        if step.left_click:
+            self.say("click" if macos.click_mouse(position) else NO_MOUSE_ACCESS, now)
+
     # ---------- drawing pieces, shared with the desk app ----------
     def status_text(self, result) -> tuple[str, bool]:
         """(text, is_gesture_held) for a status line."""
+        if self.cursor_mode.active:
+            return (CURSOR_LIFTED if self.cursor_lifted else CURSOR_HELP), True
         held = self.trigger.current
         if held:
             return f"{held.replace('_', ' ')}: {LABELS.get(held, '')}", True
+        if self.ignoring_hand:
+            return "not your hand, ignored", False
         if result.hand_landmarks:
             return "hand seen, no gesture yet", False
         return "no hand in view", False
