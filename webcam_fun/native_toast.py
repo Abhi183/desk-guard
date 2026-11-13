@@ -59,16 +59,17 @@ class Toasts:
         self._shown: list[NSPanel] = []
 
     def show(self, title: str, message: str, color: str = "#e5484d",
-             seconds: float = 5.0) -> None:
+             seconds: float = 5.0, on_click=None) -> None:
+        """on_click: called when the pop-up is clicked (it closes either way)."""
         while len(self._shown) >= MAX_SHOWN:
             self._close(self._shown[0], fade=False)
-        panel = self._make_panel(title[:60], message[:160], parse_hex(color))
+        panel = self._make_panel(title[:60], message[:160], parse_hex(color), on_click)
         self._shown.append(panel)
         self._layout()
         panel.orderFrontRegardless()
         AppHelper.callLater(max(1.0, min(seconds, 30.0)), self._close, panel)
 
-    def _make_panel(self, title: str, message: str, accent: NSColor) -> NSPanel:
+    def _make_panel(self, title: str, message: str, accent: NSColor, on_click) -> NSPanel:
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, WIDTH, HEIGHT), BORDERLESS | NONACTIVATING,
             NSBackingStoreBuffered, False)
@@ -97,7 +98,12 @@ class Toasts:
                                 NSMakeRect(18, 8, WIDTH - 30, HEIGHT - 40)))
 
         click = _ClickView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT))
-        click.on_click = lambda: self._close(panel)
+        def clicked() -> None:
+            self._close(panel)
+            if on_click is not None:
+                on_click()
+
+        click.on_click = clicked
         blur.addSubview_(click)
         panel.setContentView_(blur)
         return panel

@@ -20,12 +20,14 @@ FEATURES = MappingProxyType({
     "posture": "Posture alerts",
     "privacy": "Close personal apps when someone sits with me",
     "sounds": "Sounds",
+    "water": "Drink water reminders",
 })
 GESTURES = MappingProxyType({
     "gestures": "Gesture control (only you)",  # master switch for everything below
+    "scroll": "Two fingers: scroll",
     "volume": "Thumbs up / down: volume",
     "mute": "Fist: mute",
-    "selfie": "Peace sign: selfie",
+    "selfie": "Open palm (hold 1 s): selfie",
     "media": "Love-you sign: play / pause",
     "tabs": "Point left / right: switch tabs",
     "cursor": "Point up: move the pointer",
@@ -35,7 +37,7 @@ ALL_SWITCHES = (*FEATURES, *GESTURES)
 # How the app looks, not what it does: Enable all / Disable all leave these alone.
 DISPLAY_SWITCHES = ("show_video", "video_on_top")
 # Per-gesture actions that desk.py can turn off with --gestures-off (cursor has its own flag).
-GESTURE_ACTIONS = ("volume", "mute", "selfie", "media", "tabs")
+GESTURE_ACTIONS = ("scroll", "volume", "mute", "selfie", "media", "tabs")
 OFF_FLAGS = MappingProxyType({"auto_lock": "--no-lock", "guard": "--no-guard",
                               "posture": "--no-posture", "privacy": "--no-privacy",
                               "sounds": "--mute", "gestures": "--no-gestures",
@@ -45,6 +47,8 @@ LOCK_CHOICES = (2, 5, 10, 30)
 DEFAULT_LOCK_AFTER = 2
 SENSITIVITY = MappingProxyType({"fast": 0.25, "normal": 0.4, "careful": 0.7})  # hold seconds
 DEFAULT_SENSITIVITY = "normal"
+WATER_CHOICES = (30, 45, 60, 90)  # minutes at the desk between water reminders
+DEFAULT_WATER_EVERY = 45
 AUTO_CAMERA = "auto"   # prefer an external camera, else the built-in one
 MAX_CAMERA_ID = 200    # macOS device IDs are short; anything longer is junk
 MAX_CAMERA_NAME = 80
@@ -63,10 +67,11 @@ class Settings:
     name: str = "you"
     camera: str = AUTO_CAMERA  # AUTO_CAMERA or a camera's macOS unique ID
     camera_name: str = ""      # that camera's name, to show it while it is unplugged
+    water_every: int = DEFAULT_WATER_EVERY
 
     def _key(self) -> tuple:
         return (tuple(sorted(self.flags.items())), self.lock_after, self.sensitivity,
-                self.name, self.camera, self.camera_name)
+                self.name, self.camera, self.camera_name, self.water_every)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Settings):
@@ -75,6 +80,11 @@ class Settings:
 
     def __hash__(self) -> int:
         return hash(self._key())
+
+    def with_water_every(self, minutes: int) -> "Settings":
+        if minutes not in WATER_CHOICES:
+            raise ValueError(f"water reminders must be every {WATER_CHOICES} minutes")
+        return replace(self, water_every=minutes)
 
     def with_camera(self, camera_id: str, name: str = "") -> "Settings":
         """AUTO_CAMERA, or the unique ID of a camera (with its name for display)."""
@@ -145,6 +155,8 @@ def load(path: Path) -> Settings:
         sensitivity=sensitivity if sensitivity in SENSITIVITY else DEFAULT_SENSITIVITY,
         name=clean_name(saved.get("name")),
         **_load_camera(saved),
+        water_every=saved.get("water_every") if saved.get("water_every") in WATER_CHOICES
+        else DEFAULT_WATER_EVERY,
     )
 
 
@@ -161,7 +173,8 @@ def save(settings: Settings, path: Path) -> None:
     """Raises OSError if the file can't be written; the caller decides how to report it."""
     data = {**settings.flags, "lock_after": settings.lock_after,
             "sensitivity": settings.sensitivity, "name": settings.name,
-            "camera": settings.camera, "camera_name": settings.camera_name}
+            "camera": settings.camera, "camera_name": settings.camera_name,
+            "water_every": settings.water_every}
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 

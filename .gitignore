@@ -16,6 +16,8 @@ face_profile.npy
 
 # Local runtime state
 desk.log
+stats.json
+stats.tmp
 menubar_settings.json
 .menubar.lock
 .show_request

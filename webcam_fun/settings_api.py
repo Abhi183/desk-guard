@@ -21,6 +21,8 @@ class Host(Protocol):
     def status(self) -> str: ...
     def cameras(self) -> list[dict]: ...           # connected: [{id, name, built_in}]
     def camera_in_use(self) -> str | None: ...     # unique ID, None while not watching
+    def stats(self) -> dict: ...                   # StatsStore.snapshot()
+    def log_water(self) -> None: ...
     def apply_settings(self, settings: cfg.Settings) -> None: ...
     def toggle_watching(self) -> None: ...
     def relearn_face(self) -> None: ...
@@ -30,6 +32,8 @@ class Host(Protocol):
 # What the window shows. Sections without items are custom pages drawn by the HTML.
 CATALOG = (
     {"id": "overview", "title": "Overview", "icon": "grid"},
+    {"id": "today", "title": "Today", "icon": "chart",
+     "subtitle": "Your day at the desk. Everything is counted on this Mac only."},
     {"id": "camera", "title": "Camera", "icon": "camera",
      "subtitle": "Choose which camera Desk Guard watches with."},
     {"id": "security", "title": "Security", "icon": "shield",
@@ -48,6 +52,8 @@ CATALOG = (
      "items": [
          {"key": "posture", "label": "Posture alerts",
           "detail": "Nudges you when you lean in too close or slouch."},
+         {"key": "water", "label": "Drink water reminders",
+          "detail": "A nudge after a stretch at the desk. Only time you're at the desk counts."},
          {"key": "sounds", "label": "Sounds",
           "detail": "Play a sound with alerts. Pop-ups still show when this is off."},
      ]},
@@ -56,12 +62,14 @@ CATALOG = (
      "items": [
          {"key": "gestures", "label": "Gesture control", "master": True,
           "detail": "Turns every gesture below on or off."},
+         {"key": "scroll", "label": "Scroll", "glyph": "✌️",
+          "detail": "Hold two fingers up, then move your hand up or down like on a trackpad."},
          {"key": "volume", "label": "Volume", "glyph": "👍👎",
           "detail": "Thumbs up / down, hold to keep changing."},
          {"key": "mute", "label": "Mute", "glyph": "✊",
           "detail": "Hold a fist a little longer than other gestures."},
-         {"key": "selfie", "label": "Selfie", "glyph": "✌️",
-          "detail": "Peace sign saves a photo to snaps/."},
+         {"key": "selfie", "label": "Selfie", "glyph": "🖐️",
+          "detail": "Hold an open palm for a second to save a photo to snaps/."},
          {"key": "media", "label": "Play / pause", "glyph": "🤟",
           "detail": "Love-you sign plays or pauses YouTube, Spotify, Music."},
          {"key": "tabs", "label": "Switch tabs", "glyph": "👈👉",
@@ -97,7 +105,7 @@ class SettingsApi:
 
     CALLABLE = frozenset({
         "get_state", "set_flag", "set_all", "set_group", "set_lock_after", "set_sensitivity",
-        "set_name", "set_camera", "toggle_watching", "relearn_face", "recalibrate_posture", "open_folder",
+        "set_name", "set_camera", "set_water_every", "log_water", "toggle_watching", "relearn_face", "recalibrate_posture", "open_folder",
         "open_log"})
 
     def __init__(self, settings_file: Path, root: Path, host: Host,
@@ -134,6 +142,9 @@ class SettingsApi:
             "camera_name": settings.camera_name,
             "cameras": self._host.cameras(),
             "camera_in_use": self._host.camera_in_use(),
+            "water_every": settings.water_every,
+            "water_choices": list(cfg.WATER_CHOICES),
+            "stats": self._host.stats(),
             "catalog": CATALOG,
         }
 
@@ -175,6 +186,13 @@ class SettingsApi:
         if text and clean_name(text) != text:
             return _fail("Use plain letters, 20 characters at most.")
         return self._change(lambda s: s.with_name(text))
+
+    def set_water_every(self, minutes: int) -> dict:
+        return self._change(lambda s: s.with_water_every(minutes))
+
+    def log_water(self) -> dict:
+        self._host.log_water()
+        return _ok(self.get_state())
 
     def set_camera(self, camera_id: str) -> dict:
         """AUTO_CAMERA, or the ID of a connected camera (its name is saved alongside)."""

@@ -37,11 +37,14 @@ from webcam_fun.native_toast import Toasts
 from webcam_fun.recognition import forget_profile
 from webcam_fun.settings_api import SettingsApi
 from webcam_fun.settings_panel import SettingsPanel
+from webcam_fun.stats import StatsStore
 from webcam_fun.video_window import WATCHER_KEYS, VideoWindow
 from webcam_fun.vision import ROOT
 
 SETTINGS_FILE = ROOT / "menubar_settings.json"
 LOCK_FILE = ROOT / ".menubar.lock"
+STATS_FILE = ROOT / "stats.json"
+STATS_PUSH_S = 15.0  # refresh the stats page this often while it is open
 SHOW_REQUEST = ROOT / ".show_request"  # a second copy started from Terminal
 ICON_ON, ICON_OFF = "👁", "◌"
 FRAME_TICK_S = 1 / 30
@@ -62,6 +65,7 @@ START, STOP = "Start Watching", "Stop Watching"
 VIDEO = "Show Video Window"
 ENABLE_ALL, DISABLE_ALL = "Enable All Features", "Disable All Features"
 SETTINGS, QUIT = "Settings…", "Quit Desk Guard"
+WATER = "Log a Glass of Water"
 
 _controller = None  # the running DeskGuard, for the app delegate and menu targets
 
@@ -118,8 +122,11 @@ class DeskGuard(rumps.App):
     def __init__(self) -> None:
         super().__init__("Desk Guard", title=ICON_OFF, quit_button=None)
         self.settings = cfg.load(SETTINGS_FILE)
+        self.stats_store = StatsStore(STATS_FILE)
         self.watcher = Watcher(self.settings, on_status=self._status_from_watcher,
-                               on_camera=lambda: AppHelper.callAfter(self._camera_changed))
+                               on_camera=lambda: AppHelper.callAfter(self._camera_changed),
+                               stats=self.stats_store)
+        self.stats_push_in = STATS_PUSH_S
         self.known_cameras: list[dict] = []
         self.api = SettingsApi(SETTINGS_FILE, ROOT, host=self, opener=subprocess.Popen)
         self.state = "stopped"
@@ -140,6 +147,7 @@ class DeskGuard(rumps.App):
         self.menu = [self.status_item, self.toggle_item, self.video_item, None,
                      rumps.MenuItem(ENABLE_ALL, callback=lambda _: self.set_all(True)),
                      rumps.MenuItem(DISABLE_ALL, callback=lambda _: self.set_all(False)),
+                     rumps.MenuItem(WATER, callback=lambda _: self.log_water()),
                      rumps.MenuItem(SETTINGS, callback=lambda _: self.open_settings(), key=","),
                      None, rumps.MenuItem(QUIT, callback=lambda _: rumps.quit_application())]
         self.frame_timer = rumps.Timer(self.on_frame_tick, FRAME_TICK_S)
@@ -158,7 +166,10 @@ class DeskGuard(rumps.App):
                                  on_key=self.on_video_key)
         self.panel = SettingsPanel(self.api)
         toasts = Toasts()
-        macos.set_popup_handler(lambda *args: AppHelper.callAfter(toasts.show, *args))
+        actions = {"water": self.log_water}
+        macos.set_popup_handler(
+            lambda title, message, color, seconds, action=None: AppHelper.callAfter(
+                toasts.show, title, message, color, seconds, actions.get(action)))
         self._sync_ui()
         self.frame_timer.start()
         self.poll_timer.start()
@@ -242,6 +253,13 @@ class DeskGuard(rumps.App):
         self.frame_timer.stop()
         self.poll_timer.stop()
         self.watcher.stop()
+        self._save_stats()
+
+    def _save_stats(self) -> None:
+        try:
+            self.stats_store.save()
+        except OSError as e:
+            print(f"could not save stats: {e}", file=sys.stderr, flush=True)
 
     def _status_from_watcher(self, status: str) -> None:
         AppHelper.callAfter(self._show_state, status)  # watcher thread -> main thread
@@ -279,6 +297,11 @@ class DeskGuard(rumps.App):
             self.open_settings()
         self._place_icon()
         self._check_cameras()
+        self.stats_push_in -= POLL_S
+        if self.stats_push_in <= 0:
+            self.stats_push_in = STATS_PUSH_S
+            if self.panel is not None:
+                self.panel.push_state()
         if self.start_pending and not self.user_stopped:
             self._start_watcher()
         if self.state == "camera blocked" and not self.user_stopped:
@@ -307,6 +330,18 @@ class DeskGuard(rumps.App):
     def cameras(self) -> list[dict]:
         self.known_cameras = describe(list_cameras())
         return self.known_cameras
+
+    def stats(self) -> dict:
+        return self.stats_store.snapshot()
+
+    def log_water(self) -> None:
+        self.stats_store.add("water_glasses")
+        if self.watcher.running:
+            self.watcher.command("water")  # restart the reminder interval
+        self._save_stats()
+        macos.popup("Desk Guard", "Logged a glass of water. Nice.", "#3b82f6", 3)
+        if self.panel is not None:
+            self.panel.push_state()
 
     def camera_in_use(self) -> str | None:
         camera = self.watcher.in_use

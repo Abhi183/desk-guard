@@ -38,6 +38,7 @@ from webcam_fun.identity import (
 from webcam_fun.posture import PostureJudge
 from webcam_fun.presence import AutoLock
 from webcam_fun.recognition import FaceId
+from webcam_fun.stats import DeskTime, StatsStore
 from webcam_fun.vision import (
     ROOT,
     Box,
@@ -48,12 +49,15 @@ from webcam_fun.vision import (
     try_open_camera,
 )
 from webcam_fun.watch import ShoulderWatch
+from webcam_fun.water import WaterReminder
 
 WINDOW = "Desk Guard"
 APP_BUNDLE_ID = "local.webcamfun.deskguard"  # opening the app shows its settings window
 CAUGHT_DIR = ROOT / "caught"
 RED, GREEN, AMBER, GRAY, WHITE = (40, 40, 230), (80, 200, 80), (0, 170, 255), (150, 150, 150), (255, 255, 255)
-AMBER_HEX, GREEN_HEX = "#f5a623", "#30a46c"  # pop-up accent colors
+AMBER_HEX, GREEN_HEX, BLUE_HEX = "#f5a623", "#30a46c", "#3b82f6"  # pop-up accent colors
+WATER_SOUND = "/System/Library/Sounds/Glass.aiff"
+GOOD_POSTURE, JUDGED_POSTURE = "good", ("good", "too_close", "slouching")
 LOCK_WARNING_S = 5     # heads-up notification, only used when --lock-after is longer
 DEFAULT_LOCK_AFTER_S = 2  # short grace so one missed frame or a glance away doesn't lock
 MIN_LOCK_AFTER_S = 1
@@ -122,6 +126,11 @@ class DeskApp:
         self.gesture_app = GestureApp(argparse.Namespace(
             no_keys=args.no_keys, no_cursor=args.no_cursor, gestures_off=args.gestures_off,
             gesture_hold=args.gesture_hold))
+        self.gesture_app.on_used = self._on_gesture_used
+        self.stats: StatsStore | None = None  # set by the app; the Terminal version has none
+        self.desk_time = DeskTime()
+        self.water = WaterReminder(cfg.DEFAULT_WATER_EVERY * 60)
+        self.water_enabled = True
         self.gesture_engine: GestureEngine | None = None
         # Hand recognition runs on its own thread while OpenCV finds and recognises faces
         # on this one, which takes about a third off each frame. It is collected before any
@@ -157,6 +166,9 @@ class DeskApp:
         self.lock_enabled = flags["auto_lock"]
         self.muted = not flags["sounds"]
         self.gestures_enabled = flags["gestures"]
+        self.water_enabled = flags["water"]
+        if settings.water_every * 60 != self.water.every_s:
+            self.water.set_every(settings.water_every * 60)
         self.gesture_app.configure(
             disabled={key for key in cfg.GESTURE_ACTIONS if not flags[key]},
             cursor=flags["cursor"], hold=cfg.SENSITIVITY[settings.sensitivity])
@@ -199,6 +211,7 @@ class DeskApp:
         CAUGHT_DIR.mkdir(exist_ok=True)
         cv2.imwrite(str(CAUGHT_DIR / time.strftime("caught_%Y%m%d_%H%M%S.jpg")), frame)
         self.caught += 1
+        self._count("shoulder_alerts")
 
     def on_away(self, now: float, stranger: bool) -> None:
         reason = "unrecognised face" if stranger else "away"
@@ -208,6 +221,7 @@ class DeskApp:
             return
         result = macos.lock_screen()
         self.log(f"{reason} -> screen {result}")
+        self._count("locks")
         self.say(f"screen {result}", now)
 
     def check_lock_warning(self, now: float) -> None:
@@ -240,6 +254,7 @@ class DeskApp:
             self.say("would close personal apps now (dry run)", now)
             return
         self.say("company: closing personal apps", now)
+        self._count("company")
         # Closing browser tabs waits on AppleScript, so keep it off the camera loop.
         threading.Thread(target=self._close_personal, daemon=True).start()
 
@@ -258,6 +273,7 @@ class DeskApp:
     def on_bad_posture(self, status: str) -> None:
         text = "Sit back a bit" if status == "too_close" else "Sit up straight"
         self.log(f"posture: {status}")
+        self._count("posture_alerts")
         macos.alert("Desk Guard", "Posture", text, AMBER_HEX)
         if not self.muted:
             macos.play_sound("/System/Library/Sounds/Tink.aiff")
@@ -270,6 +286,7 @@ class DeskApp:
         faces = [face.box for face in detected]
         self.me = self.face_id.identify(frame, detected, now)
         hand_result = self._collect_hands(hands)
+        at_desk_s = self._step_wellbeing(faces, now)
         if not self.args.no_guard and self.watch.update(len(faces) > 1):
             self.on_intruder(frame, now)
         if not self.args.no_privacy and self.company.update(has_company(faces), now):
@@ -287,12 +304,51 @@ class DeskApp:
             self.posture_status, alert = self.posture.update(main_face, frame.shape[0], now)
             if alert:
                 self.on_bad_posture(self.posture_status)
+            if at_desk_s and self.posture_status in JUDGED_POSTURE:
+                self._count("posture_judged_s", at_desk_s)
+                if self.posture_status == GOOD_POSTURE:
+                    self._count("posture_good_s", at_desk_s)
             if self.posture.calibrated and not was_calibrated:
                 macos.alert("Desk Guard", "Posture saved",
                             "This is your good posture. I will nudge you if you drift",
                             GREEN_HEX)
         self._step_gestures(frame, faces, now, hand_result)
         return faces
+
+    # ---------- wellbeing and daily stats ----------
+    def _count(self, key: str, amount: float = 1.0) -> None:
+        if self.stats is not None:
+            self.stats.add(key, amount)
+
+    def _step_wellbeing(self, faces: list[Box], now: float) -> float:
+        """Desk time, breaks and water reminders. Returns seconds at the desk this frame."""
+        seen = self.me is not None or (self.face_id.learning and bool(faces))
+        at_desk_s, back_from_break = self.desk_time.update(seen, now)
+        if at_desk_s:
+            self._count("desk_s", at_desk_s)
+        if back_from_break:
+            self._count("breaks")
+            self.log("back from a break")
+        if self.water_enabled and at_desk_s and self.water.update(at_desk_s):
+            self.on_water()
+        return at_desk_s
+
+    def on_water(self) -> None:
+        self.log("water reminder")
+        self._count("water_reminders")
+        macos.popup("Time for some water", "Click here once you've had a glass.", BLUE_HEX,
+                    15, action="water")
+        if not self.muted:
+            macos.play_sound(WATER_SOUND)
+
+    def drank_water(self) -> None:
+        """You logged a glass (the app counts it): start the full interval again."""
+        self.water.drank()
+
+    def _on_gesture_used(self, what: str) -> None:
+        self._count("gestures")
+        if what == "scroll":
+            self._count("scrolls")
 
     def _owner_at_desk(self, frame: np.ndarray, faces: list[Box], now: float) -> bool:
         """You, physically at the desk: your face, or failing that your body in your spot."""

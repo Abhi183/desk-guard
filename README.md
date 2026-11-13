@@ -49,7 +49,8 @@ from scripts.
 | Thumbs up / down (hold) | Volume up / down, with the normal macOS volume pop-up |
 | Fist (hold a bit longer, 0.8 s) | Mute toggle |
 | Index finger pointing left / right (hold) | Previous / next browser tab |
-| Peace sign (hold) | Webcam selfie to `snaps/` |
+| Two fingers up, then move the hand up / down | Scroll, like two fingers on a trackpad (follows your natural-scrolling setting) |
+| Open palm (hold 1 s) | Webcam selfie to `snaps/` |
 | Love-you sign 🤟 (hold) | Play / pause whatever is playing (YouTube, Spotify, Music) |
 | Index finger pointing up (hold) | Take the mouse pointer. See below |
 
@@ -139,7 +140,11 @@ window, clicking the Dock icon, or Settings... in the eye menu.
   it returning. After a switch, posture and the auto-lock start fresh for the new view.
 - Security: auto-lock with lock delay (2/5/10/30 s), shoulder-surfer alarm, close personal
   apps with company
-- Wellbeing: posture alerts, sounds, recalibrate posture
+- Today: time at the desk, good-posture share, glasses of water, breaks (5+ min away),
+  a 7-day chart, and counts of nudges, alerts, locks, gestures and scrolls. Kept for 30
+  days in `stats.json` (gitignored, never leaves the Mac)
+- Wellbeing: posture alerts, drink water reminders (every 30/45/60/90 min of desk time;
+  click the reminder or "Log a glass" to count one), sounds, recalibrate posture
 - Gestures: master switch, one switch per gesture, Enable all / Disable all, hold time
   (fast 0.25 s, normal 0.4 s, careful 0.7 s)
 - Face & identity: your name, relearn my face

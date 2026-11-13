@@ -2,7 +2,9 @@
 
   thumbs up / down (hold)   volume up / down
   fist (hold a little longer) mute / unmute
-  peace sign (hold)         take a webcam selfie
+  two fingers up (hold)     scroll: move the hand up / down like two fingers on a trackpad;
+                            lower the hand to let go (needs Accessibility)
+  open palm (hold 1 s)      take a webcam selfie
   love-you sign (hold)      play / pause media (YouTube, Spotify, Music...)
   point left / right (hold)  previous / next browser tab (needs Accessibility)
   point up (hold)           take the mouse pointer: it follows your hand. Then pinch thumb
@@ -14,6 +16,7 @@ Keys: q quit
 
 import argparse
 import time
+from typing import Callable
 
 import cv2
 import mediapipe as mp
@@ -28,6 +31,7 @@ from webcam_fun.cursor import (
     pinch_ratio,
 )
 from webcam_fun.gesture_trigger import HoldTrigger
+from webcam_fun.scroll import MIDDLE_MCP, ScrollMode, wheel_delta
 from webcam_fun.pointing import classify_point
 from webcam_fun.vision import GESTURE_MODEL, ROOT, open_camera, put_text, require_model
 
@@ -36,19 +40,26 @@ MAX_HANDS = 2  # so a visitor's hand in view doesn't hide yours from the recogni
 SNAP_DIR = ROOT / "snaps"
 WHITE, CYAN, GREEN = (255, 255, 255), (255, 220, 0), (80, 200, 80)
 LABELS = {"Thumb_Up": "volume up", "Thumb_Down": "volume down", "Closed_Fist": "mute",
-          "Victory": "selfie", "ILoveYou": "play / pause", "Point_Right": "next tab",
+          "Open_Palm": "selfie", "ILoveYou": "play / pause", "Point_Right": "next tab",
           "Point_Left": "previous tab", "Pointing_Up": "hold to take the pointer"}
 CURSOR_HELP = "pointer: pinch or open palm = click | fist = lift | lower hand = stop"
 CURSOR_LIFTED = "pointer lifted: move your hand, then point again"
 NO_MOUSE_ACCESS = "pointer blocked: allow Desk Guard / Python in Accessibility"
+NO_SCROLL_ACCESS = "scroll blocked: allow Desk Guard in Accessibility"
+SCROLL_HELP = "scrolling: move two fingers up / down | lower hand = stop"
 # Which setting switches each gesture on and off (see webcam_fun.settings).
 GESTURE_ACTIONS = {"Thumb_Up": "volume", "Thumb_Down": "volume", "Closed_Fist": "mute",
-                   "Victory": "selfie", "ILoveYou": "media", "Point_Right": "tabs",
+                   "Open_Palm": "selfie", "ILoveYou": "media", "Point_Right": "tabs",
                    "Point_Left": "tabs"}
+# Gestures that are a mode you hold rather than a one-off action. Two fingers up is always
+# scrolling (it used to be the selfie).
+MODE_ACTIONS = frozenset({"scroll"})
 DEFAULT_HOLD_S = 0.4
 MIN_HOLD_S, MAX_HOLD_S = 0.1, 2.0
 # A fist also shows up while you lower or relax your hand, so mute needs a longer hold.
 MUTE_HOLD_S = 0.8
+# An open palm is a natural resting hand, so a selfie needs a deliberate one-second hold.
+SELFIE_HOLD_S = 1.0
 # Lowering your hand after using the pointer passes through fists and palms; ignore them.
 AFTER_POINTER_S = 0.8
 HAND_CONNECTIONS = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
@@ -69,7 +80,7 @@ def parse_args() -> argparse.Namespace:
 
 def add_gesture_options(p: argparse.ArgumentParser) -> None:
     """Options shared with desk.py."""
-    names = ", ".join(sorted(set(GESTURE_ACTIONS.values())))
+    names = ", ".join(sorted(set(GESTURE_ACTIONS.values()) | MODE_ACTIONS))
     p.add_argument("--gestures-off", default="", metavar="LIST",
                    help=f"comma-separated gestures to ignore: {names}")
     p.add_argument("--gesture-hold", type=float, default=DEFAULT_HOLD_S, metavar="SECONDS",
@@ -78,7 +89,7 @@ def add_gesture_options(p: argparse.ArgumentParser) -> None:
 
 def check_gesture_options(p: argparse.ArgumentParser,
                           args: argparse.Namespace) -> argparse.Namespace:
-    known = set(GESTURE_ACTIONS.values())
+    known = set(GESTURE_ACTIONS.values()) | MODE_ACTIONS
     unknown = parse_off(args.gestures_off) - known
     if unknown:
         p.error(f"--gestures-off: unknown gesture {', '.join(sorted(unknown))}; "
@@ -125,6 +136,10 @@ class GestureApp:
         self.cursor_mode = CursorMode()
         self.cursor_driver = CursorDriver()
         self.cursor_lifted = False
+        self.scroll_mode = ScrollMode()
+        self.natural_scrolling = macos.natural_scrolling()
+        self.scroll_blocked = False
+        self.on_used: Callable[[str], None] | None = None  # for the daily stats
         self.hold: float | None = None
         self.cursor_enabled = False
         self.configure(disabled=parse_off(getattr(args, "gestures_off", "")),
@@ -140,20 +155,28 @@ class GestureApp:
         if self.cursor_enabled and not cursor:  # let go of the pointer if just switched off
             self.cursor_mode = CursorMode()
         self.cursor_enabled = cursor
+        if "scroll" in self.disabled:
+            self.scroll_mode.reset()
         if hold != self.hold:
             self.hold = hold
             self.trigger = HoldTrigger(
                 hold_s=hold, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4},
-                hold_overrides={"Closed_Fist": max(MUTE_HOLD_S, hold * 2)})
+                hold_overrides={"Closed_Fist": max(MUTE_HOLD_S, hold * 2),
+                                "Open_Palm": max(SELFIE_HOLD_S, hold * 2.5)})
 
     def say(self, text: str, now: float) -> None:
         self.message, self.message_until = text, now + 2.5
         print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gesture: {text}", flush=True)
 
+    def _used(self, what: str) -> None:
+        if self.on_used is not None:
+            self.on_used(what)
+
     def act(self, gesture: str, frame: np.ndarray, now: float) -> None:
+        self._used(gesture_action(gesture) or gesture)
         if gesture in ("Thumb_Up", "Thumb_Down", "Closed_Fist"):
             self.adjust_audio(gesture, now)
-        elif gesture == "Victory":
+        elif gesture == "Open_Palm":
             SNAP_DIR.mkdir(exist_ok=True)
             path = SNAP_DIR / time.strftime("selfie_%Y%m%d_%H%M%S.jpg")
             cv2.imwrite(str(path), frame)
@@ -197,6 +220,9 @@ class GestureApp:
         if self.cursor_enabled and self._step_cursor(gesture, points, now):
             self.trigger.update(None, now)  # other gestures are off while you hold the pointer
             return gesture
+        if "scroll" not in self.disabled and self._step_scroll(gesture, points, now):
+            self.trigger.update(None, now)  # and while you scroll
+            return gesture
         if points is not None:  # sideways pointing isn't a built-in gesture
             gesture = classify_point(points) or gesture
         if now - self.pointer_released_at < AFTER_POINTER_S:
@@ -210,6 +236,22 @@ class GestureApp:
         if fired:
             self.act(fired, frame, now)
         return gesture
+
+    def _step_scroll(self, gesture: str | None, points: list | None, now: float) -> bool:
+        """Two-finger scrolling for this frame. True while your hand holds the page."""
+        hand_y = points[MIDDLE_MCP][1] if points else None
+        step = self.scroll_mode.update(gesture, hand_y, now)
+        if step.entered:
+            self.scroll_blocked = False
+            self._used("scroll")
+            self.say("scrolling", now)
+        if step.left:
+            self.pointer_released_at = now  # lowering the hand shouldn't fire a gesture
+        if step.pixels and not self.scroll_blocked:
+            if not macos.scroll(wheel_delta(step.pixels, self.natural_scrolling)):
+                self.scroll_blocked = True  # say it once, not every frame
+                self.say(NO_SCROLL_ACCESS, now)
+        return step.active
 
     def _step_cursor(self, gesture: str | None, points: list | None, now: float) -> bool:
         """Pointer control for this frame. True while your hand holds the pointer."""
@@ -245,6 +287,8 @@ class GestureApp:
         """(text, is_gesture_held) for a status line."""
         if self.cursor_mode.active:
             return (CURSOR_LIFTED if self.cursor_lifted else CURSOR_HELP), True
+        if self.scroll_mode.active:
+            return SCROLL_HELP, True
         held = self.trigger.current
         if held:
             return f"{held.replace('_', ' ')}: {LABELS.get(held, '')}", True
@@ -279,11 +323,12 @@ class GestureApp:
 
     def draw_legend(self, img: np.ndarray, top: int) -> None:
         y = top
-        for name in ("Thumb_Up", "Thumb_Down", "Closed_Fist", "Victory", "ILoveYou"):
+        for name in ("Thumb_Up", "Thumb_Down", "Closed_Fist", "Open_Palm", "ILoveYou"):
             put_text(img, f"{name.replace('_', ' ')}: {LABELS[name]}", (12, y), WHITE,
                      scale=0.45, thickness=1)
             y += 20
         put_text(img, "point left/right: change tab", (12, y), WHITE, scale=0.45, thickness=1)
+        put_text(img, "two fingers up: scroll", (12, y + 20), WHITE, scale=0.45, thickness=1)
 
     def render(self, frame: np.ndarray, result, now: float) -> np.ndarray:
         img = self.draw_effects(frame.copy(), result, now)

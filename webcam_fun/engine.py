@@ -27,11 +27,14 @@ from webcam_fun import macos, personal  # noqa: E402
 from webcam_fun import settings as cfg  # noqa: E402
 from webcam_fun.cameras import Camera, choose, list_cameras  # noqa: E402
 from webcam_fun.desk import DeskApp, parse_args  # noqa: E402
+from webcam_fun.stats import StatsStore  # noqa: E402
 from webcam_fun.vision import try_open_camera  # noqa: E402
 
 FRAME_WAIT_S = 1.0          # no new frame for this long: the camera is gone (screen locked)
 RECONNECT_DELAY_S = 2.0
 FPS_REPORT_S = 60.0
+STATS_SAVE_S = 60.0
+COMMANDS = {"water": "drank_water"}  # commands from the app -> DeskApp methods
 CAMERA_CHECK_S = 2.0        # how often to look for a better camera (plugged in, or picked)
 RESTART_DELAY_S = 2.0       # after a crash, wait this long before watching again
 MAX_CRASHES, CRASH_WINDOW_S = 3, 300.0
@@ -120,14 +123,16 @@ class Watcher:
     """Owns the camera and the DeskApp. All public methods are safe to call from any thread."""
 
     def __init__(self, settings: cfg.Settings, on_status: Callable[[str], None],
-                 on_camera: Callable[[], None] = lambda: None) -> None:
+                 on_camera: Callable[[], None] = lambda: None,
+                 stats: StatsStore | None = None) -> None:
+        self._stats = stats
         self._on_status = on_status
         self._on_camera = on_camera  # the camera in use changed
         self.in_use: Camera | None = None
         self._lock = threading.Lock()
         self._pending: cfg.Settings | None = settings
         self._latest_settings = settings
-        self._keys: deque[int] = deque()
+        self._keys: deque[int | str] = deque()  # key codes, or command names
         self._render = settings.flags["show_video"]
         self._out: np.ndarray | None = None
         self._out_seq = 0
@@ -176,6 +181,13 @@ class Watcher:
     def key(self, code: int) -> None:
         with self._lock:
             self._keys.append(code)
+
+    def command(self, name: str) -> None:
+        """Run a DeskApp command (see COMMANDS) on the watcher thread."""
+        if name not in COMMANDS:
+            raise KeyError(name)
+        with self._lock:
+            self._keys.append(name)
 
     def latest(self, after_seq: int) -> tuple[np.ndarray | None, int]:
         """The newest rendered frame if there is one newer than `after_seq`."""
@@ -249,6 +261,7 @@ class Watcher:
                     log(f"could not close cleanly: {e!r}")
             feed.close()
             self.in_use = None
+            self._save_stats()
             if run.stop.is_set():
                 self._set_status(run, "stopped")
 
@@ -267,6 +280,7 @@ class Watcher:
             settings, self._pending = self._pending or self._latest_settings, None
         app = DeskApp(parse_args(cfg.to_args(settings)))
         app.show_gear = False  # the window has a real gear button
+        app.stats = self._stats
         app.apply(settings)
         if settings.flags["privacy"]:
             personal.ask_tab_permission()
@@ -274,7 +288,15 @@ class Watcher:
                     "Sit normally for a moment so I can learn your posture", GREEN_HEX)
         return app
 
-    def _take_inputs(self) -> tuple[cfg.Settings | None, list[int], bool]:
+    def _save_stats(self) -> None:
+        if self._stats is None:
+            return
+        try:
+            self._stats.save()
+        except OSError as e:
+            log(f"could not save stats: {e}")
+
+    def _take_inputs(self) -> tuple[cfg.Settings | None, list[int | str], bool]:
         with self._lock:
             pending, self._pending = self._pending, None
             keys = list(self._keys)
@@ -284,6 +306,7 @@ class Watcher:
     def _loop(self, run: _Run, app: DeskApp, feed: _Feed) -> None:
         seq, frames, since = 0, 0, time.monotonic()
         next_check = time.monotonic() + CAMERA_CHECK_S
+        next_save = time.monotonic() + STATS_SAVE_S
         while not run.stop.is_set():
             pending, keys, render = self._take_inputs()
             if pending is not None:
@@ -291,7 +314,13 @@ class Watcher:
                 next_check = 0.0  # the camera choice may have changed: look now
             now = time.monotonic()
             for code in keys:
-                app.handle_key(code, now)
+                if isinstance(code, str):
+                    getattr(app, COMMANDS[code])()
+                else:
+                    app.handle_key(code, now)
+            if now >= next_save:
+                next_save = now + STATS_SAVE_S
+                self._save_stats()
             if now >= next_check:
                 next_check = now + CAMERA_CHECK_S
                 if self._switch_if_better(feed):

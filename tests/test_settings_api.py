@@ -23,6 +23,14 @@ class FakeHost:
     def camera_in_use(self):
         return self.using
 
+    def stats(self):
+        return {"today": {"water_glasses": self.glasses}, "week": []}
+
+    def log_water(self):
+        self.glasses += 1
+
+    glasses = 0
+
     def apply_settings(self, settings):
         self.applied.append(settings)
 
@@ -149,3 +157,9 @@ def test_pick_a_camera_saves_its_name_and_applies_live(api, host, tmp_path):
 def test_cannot_pick_a_camera_that_is_not_connected(api, host):
     assert not api.set_camera("usb-404")["ok"]
     assert host.applied == []
+
+
+def test_water_interval_and_logging_a_glass(api, host):
+    assert api.set_water_every(60)["state"]["water_every"] == 60
+    assert not api.set_water_every(7)["ok"]
+    assert api.log_water()["state"]["stats"]["today"]["water_glasses"] == 1

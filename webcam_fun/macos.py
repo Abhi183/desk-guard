@@ -29,19 +29,21 @@ _popup_handler = None  # set by the app to draw pop-ups itself (webcam_fun.nativ
 
 
 def set_popup_handler(handler) -> None:
-    """handler(title, message, color, seconds); safe to call from any thread."""
+    """handler(title, message, color, seconds, action); safe to call from any thread.
+    `action` names what clicking the pop-up should do (e.g. "water"), or None."""
     global _popup_handler
     _popup_handler = handler
 
 
-def popup(title: str, message: str, color: str = "#e5484d", seconds: float = 5.0) -> None:
+def popup(title: str, message: str, color: str = "#e5484d", seconds: float = 5.0,
+          action: str | None = None) -> None:
     """Our own on-screen pop-up; shows even when notification banners are hidden.
 
     Inside the app it is a native panel; run from Terminal it is a small Tk window
     (webcam_fun.toast) in its own process.
     """
     if _popup_handler is not None:
-        _popup_handler(title, message, color, seconds)
+        _popup_handler(title, message, color, seconds, action)
         return
     subprocess.Popen([sys.executable, "-m", "webcam_fun.toast", title, message, color,
                       str(seconds)], cwd=PROJECT_ROOT, **QUIET)
@@ -200,6 +202,33 @@ def click_mouse(position: tuple[float, float], right: bool = False) -> bool:
                            position, Quartz.kCGMouseButtonRight, click=True)
     return _post_mouse((Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp),
                        position, Quartz.kCGMouseButtonLeft, click=True)
+
+
+def scroll(pixels: int) -> bool:
+    """Scroll whatever is under the pointer by `pixels` (positive = up, like a wheel).
+    False when this process may not post events (no Accessibility permission)."""
+    if pixels == 0:
+        return True
+    try:
+        import Quartz
+    except ImportError:
+        return False
+    if not Quartz.CGPreflightPostEventAccess():
+        return False
+    event = Quartz.CGEventCreateScrollWheelEvent2(
+        None, Quartz.kCGScrollEventUnitPixel, 1, int(pixels), 0, 0)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    return True
+
+
+def natural_scrolling() -> bool:
+    """The "Natural scrolling" setting (on unless you turned it off)."""
+    try:
+        from Foundation import NSUserDefaults
+    except ImportError:
+        return True
+    value = NSUserDefaults.standardUserDefaults().objectForKey_("com.apple.swipescrolldirection")
+    return True if value is None else bool(value)
 
 
 def keystroke(script_body: str) -> str | None:

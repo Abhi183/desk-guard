@@ -136,6 +136,25 @@
   .bulk { display: flex; gap: 10px; }
   .bulk .btn { flex: 1; padding: 9px; }
 
+  /* today */
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .stat { background: var(--card); border-radius: 12px; box-shadow: var(--shadow); padding: 14px 16px;
+          display: flex; flex-direction: column; gap: 2px; min-height: 104px; }
+  .stat .k { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .stat .v { font-size: 22px; white-space: nowrap; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .stat .s { font-size: 11.5px; color: var(--muted); }
+  .stat .btn { margin-top: auto; align-self: flex-start; padding: 4px 10px; font-size: 12px; }
+  .stat.water .v { color: #3b82f6; }
+  .week { display: flex; align-items: flex-end; gap: 10px; height: 150px; padding: 16px 16px 10px; }
+  .day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; }
+  .day .barbox { flex: 1; width: 100%; display: flex; align-items: flex-end; }
+  .day .bar { width: 100%; border-radius: 6px 6px 3px 3px; background: var(--accent-soft); min-height: 3px; }
+  .day.today .bar { background: var(--accent); }
+  .day .lbl { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .day.today .lbl { color: var(--text); }
+  .day .drops { font-size: 10.5px; color: #3b82f6; height: 13px; font-variant-numeric: tabular-nums; }
+  .count { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+
   /* camera picker */
   .choice { cursor: default; }
   .choice:hover { background: var(--hover); }
@@ -197,6 +216,7 @@ const ICONS = {
   display: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
   folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
   camera: '<rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.5l6-3.5v10l-6-3.5"/>',
+  chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
   auto: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
@@ -311,6 +331,10 @@ function groupButtons(group) {
           h("button", { class: "btn", onclick: () => change("set_group", group, false) }, "Disable all")];
 }
 function allKeys() { return state.catalog.flatMap((s) => (s.items || []).map((i) => i.key)).filter((k) => !DISPLAY_KEYS.has(k)); }
+function duration(seconds) {
+  const m = Math.floor(seconds / 60);
+  return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` : `${m} min`;
+}
 function cameraInUseName() {
   const c = (state.cameras || []).find((x) => x.id === state.camera_in_use);
   return c ? c.name : null;
@@ -364,7 +388,16 @@ const PAGES = {
   },
   wellbeing() {
     const sec = section("wellbeing");
-    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))),
+    const rows = sec.items.map((i) => settingRow(i));
+    const waterAt = sec.items.findIndex((i) => i.key === "water");
+    const waterOn = state.flags.water;
+    rows.splice(waterAt + 1, 0, h("div", { class: "sub" + (waterOn ? "" : " dim") },
+      h("div", { class: "seg-row" }, h("span", { class: "detail" }, "Remind me after this much desk time"),
+        seg(state.water_choices.map((m) => [m, `${m} min`]), state.water_every, (m) => change("set_water_every", m))),
+      h("div", { class: "seg-row", style: "margin-top:10px" },
+        h("span", { class: "detail" }, `${state.stats.today.water_glasses} glass${state.stats.today.water_glasses === 1 ? "" : "es"} today. Clicking a reminder logs one too.`),
+        h("button", { class: "btn", onclick: () => call("log_water") }, "Log a glass"))));
+    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, rows),
       h("div", { class: "label" }, "Posture"),
       h("div", { class: "card" + (state.flags.posture ? "" : " dim") }, h("div", { class: "row" },
         h("div", { class: "text" }, h("div", { class: "title" }, "Recalibrate posture"),
@@ -387,6 +420,42 @@ const PAGES = {
           seg(Object.entries(state.sensitivity_levels).map(([k, s]) => [k, `${SENSITIVITY_NAMES[k] || k} · ${s}s`]),
               state.sensitivity, (k) => change("set_sensitivity", k))),
         h("div", { class: "hint" }, "Careful avoids accidental triggers. Mute always needs at least 0.8 s.")));
+  },
+  today() {
+    const sec = section("today");
+    const d = state.stats.today;
+    const glasses = d.water_glasses;
+    const good = d.good_posture;
+    const stat = (k, v, s, extra = null, cls = "") => h("div", { class: "stat " + cls },
+      h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, s), extra);
+    const week = state.stats.week;
+    const most = Math.max(3600, ...week.map((x) => x.desk_s));
+    const dayName = (iso) => new Date(iso + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" });
+    const count = (label, n) => h("div", { class: "row" },
+      h("div", { class: "text" }, h("div", { class: "title" }, label)), h("span", { class: "count" }, String(Math.round(n))));
+    return h("div", { class: "page" }, head(sec),
+      h("div", { class: "stat-grid" },
+        stat("Time at desk", duration(d.desk_s), "counted while Desk Guard sees you"),
+        stat("Good posture", good == null ? "–" : `${Math.round(good * 100)}%`,
+          good == null ? "after a few minutes of watching" : "of the time it could tell"),
+        stat("Water", `${glasses} ${glasses === 1 ? "glass" : "glasses"}`, `${d.water_reminders} reminder${d.water_reminders === 1 ? "" : "s"} so far`,
+          h("button", { class: "btn", onclick: () => call("log_water") }, "+ Log a glass"), "water"),
+        stat("Breaks", String(d.breaks), "away from the desk 5+ min")),
+      h("div", { class: "label" }, "This week · time at desk"),
+      h("div", { class: "card" }, h("div", { class: "week" }, week.map((x, i) =>
+        h("div", { class: "day" + (i === week.length - 1 ? " today" : ""), title: `${x.date}: ${duration(x.desk_s)}, ${x.water_glasses} water` },
+          h("div", { class: "drops" }, x.water_glasses ? `💧${x.water_glasses}` : ""),
+          h("div", { class: "barbox" }, h("div", { class: "bar", style: `height:${Math.max(2, (x.desk_s / most) * 100)}%` })),
+          h("div", { class: "lbl" }, i === week.length - 1 ? "Today" : dayName(x.date)))))),
+      h("div", { class: "label" }, "Today's activity"),
+      h("div", { class: "card" },
+        count("Posture nudges", d.posture_alerts),
+        count("Shoulder-surfer alerts", d.shoulder_alerts),
+        count("Screen locks", d.locks),
+        count("Company detected", d.company),
+        count("Gestures used", d.gestures),
+        count("Two-finger scrolls", d.scrolls)),
+      h("div", { class: "hint", style: "margin:10px 4px" }, "A new day starts at midnight. The last 30 days are kept in stats.json on this Mac."));
   },
   camera() {
     const sec = section("camera");

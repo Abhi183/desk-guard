@@ -114,7 +114,8 @@ def test_gesture_action_names():
     assert gesture_action("Thumb_Up") == "volume"
     assert gesture_action("Closed_Fist") == "mute"
     assert gesture_action("Point_Left") == "tabs"
-    assert gesture_action("Open_Palm") is None
+    assert gesture_action("Open_Palm") == "selfie"
+    assert gesture_action("Victory") is None  # two fingers is scrolling, not an action
 
 
 class _Result:
@@ -125,12 +126,14 @@ class _Result:
 
 def _app(**kwargs):
     import argparse
-    defaults = {"no_keys": False, "no_cursor": True, "gestures_off": "", "gesture_hold": 0.4}
+    # scroll off: these tests must never post real scroll events to the screen
+    defaults = {"no_keys": False, "no_cursor": True, "gestures_off": "scroll",
+                "gesture_hold": 0.4}
     return GestureApp(argparse.Namespace(**{**defaults, **kwargs}))
 
 
 def test_disabled_gesture_never_fires(monkeypatch):
-    app = _app(gestures_off="mute")
+    app = _app(gestures_off="mute,scroll")
     fired = []
     monkeypatch.setattr(app, "act", lambda g, *_: fired.append(g))
     for t in range(30):
@@ -143,8 +146,8 @@ def test_enabled_gesture_fires(monkeypatch):
     fired = []
     monkeypatch.setattr(app, "act", lambda g, *_: fired.append(g))
     for t in range(30):
-        app.step(_Result("Victory"), None, t * 0.1)
-    assert fired == ["Victory"]
+        app.step(_Result("ILoveYou"), None, t * 0.1)
+    assert fired == ["ILoveYou"]
 
 
 def test_mute_needs_a_longer_hold_than_other_gestures(monkeypatch):
@@ -162,7 +165,7 @@ def test_no_gestures_fire_right_after_the_pointer_is_released(monkeypatch):
     monkeypatch.setattr(app, "act", lambda g, *_: fired.append(g))
     app.pointer_released_at = 10.0
     for t in [10 + i * 0.05 for i in range(10)]:  # 0.5 s of peace sign right after release
-        app.step(_Result("Victory"), None, t)
+        app.step(_Result("ILoveYou"), None, t)
     assert fired == []
 
 
