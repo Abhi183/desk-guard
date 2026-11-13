@@ -1,351 +1,387 @@
-"""Menu bar controller for Desk Guard. Starts desk.py as a child process and
-lets you start/stop it and flip its options from the top menu bar."""
+"""Desk Guard, the app: menu bar icon, Dock icon, video window, settings window and the
+watcher, all in one process.
+
+    python -m webcam_fun.menubar        (Desk Guard.app runs exactly this)
+
+Settings apply live: nothing restarts when you flip a switch. The watcher runs on
+background threads (webcam_fun.engine); everything that touches AppKit runs here on the
+main thread.
+"""
 
 import fcntl
 import subprocess
 import sys
-import time
 
+import AVFoundation
+import objc
 import rumps
-from AppKit import NSApplication
-from Foundation import NSUserDefaults
+from AppKit import (
+    NSApplication,
+    NSApplicationActivationPolicyRegular,
+    NSEventModifierFlagCommand,
+    NSEventModifierFlagOption,
+    NSEventModifierFlagShift,
+    NSMenu,
+    NSMenuItem,
+)
+from Foundation import NSObject, NSUserDefaults
+from PyObjCTools import AppHelper
 from rumps import rumps as rumps_core
 
 from webcam_fun import macos
 from webcam_fun import settings as cfg
-from webcam_fun.dock import QUIT_ALL_REQUEST, hide_from_dock
-from webcam_fun.gestures import __doc__ as GESTURE_HELP
+from webcam_fun.dock import QUIT_ALL_REQUEST, use_desk_guard_icon
+from webcam_fun.engine import Watcher
+from webcam_fun.native_toast import Toasts
 from webcam_fun.recognition import forget_profile
-from webcam_fun.settings_window import (
-    RELEARN_REQUEST,
-    STATUS_NAME,
-    TOGGLE_REQUEST,
-    open_settings_window,
-)
+from webcam_fun.settings_api import SettingsApi
+from webcam_fun.settings_panel import SettingsPanel
+from webcam_fun.video_window import WATCHER_KEYS, VideoWindow
 from webcam_fun.vision import ROOT
 
 SETTINGS_FILE = ROOT / "menubar_settings.json"
-LOG_FILE = ROOT / "desk.log"
 LOCK_FILE = ROOT / ".menubar.lock"
-SHOW_REQUEST = ROOT / ".show_request"  # touched by a second launch of the app
-CAUGHT_DIR = ROOT / "caught"
+SHOW_REQUEST = ROOT / ".show_request"  # a second copy started from Terminal
 ICON_ON, ICON_OFF = "👁", "◌"
-POLL_S = 2
-RETRY_S = 6
-CAMERA_ERROR_EXIT = 1  # desk.py exits with 1 when it cannot open the camera
-# Where macOS puts the icon, in points from the right edge of the menu bar. Without this a
-# full menu bar on a notched MacBook drops new icons behind the notch.
+FRAME_TICK_S = 1 / 30
+POLL_S = 1.0
+RETRY_S = 6.0
 ITEM_AUTOSAVE_NAME = "DeskGuardEye"
 ITEM_PREFERRED_POSITION = 260.0
 CAMERA_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
+AV_NOT_DETERMINED, AV_AUTHORIZED = 0, 3
+AMBER, GREEN = "#f5a623", "#30a46c"
+STATUS_LINE = {"watching": "Watching", "starting": "Starting…", "stopped": "Stopped",
+               "camera blocked": "Camera not allowed"}
+VIDEO_MESSAGE = {"starting": "Starting camera…", "stopped": "Not watching",
+                 "camera blocked": "Desk Guard needs the camera. Allow it in System Settings."}
 
-START, STOP = "Start watching", "Stop watching"
-VIDEO = "Show video window"
-ENABLE_ALL, DISABLE_ALL = "Enable all features", "Disable all features"
-GROUP_ON, GROUP_OFF = "Enable all gestures", "Disable all gestures"
-FEATURES_MENU, GESTURES_MENU, LOCK_MENU = "Features", "Gestures", "Lock after"
-SENSITIVITY_TITLE = "Hold time: {level} ({seconds:g}s)"
-GUIDE, RELEARN, SETTINGS = "Gesture guide...", "Relearn my face", "Settings..."
-CAUGHT, LOG, QUIT = "Open caught photos", "Open log", "Quit Desk Guard"
-# Several quick clicks in the menu restart the watcher once, after the last click.
-RESTART_DEBOUNCE_S = 0.8
-APPLY_TICK_S = 0.25
+START, STOP = "Start Watching", "Stop Watching"
+VIDEO = "Show Video Window"
+ENABLE_ALL, DISABLE_ALL = "Enable All Features", "Disable All Features"
+SETTINGS, QUIT = "Settings…", "Quit Desk Guard"
+
+_controller = None  # the running DeskGuard, for the app delegate and menu targets
+
+
+class _AppDelegate(rumps_core.NSApp):
+    """rumps' delegate plus: Dock click opens settings, quitting stops the camera."""
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
+        if _controller is not None:
+            _controller.open_settings()
+        return True
+
+    def applicationWillTerminate_(self, _notification):
+        if _controller is not None:
+            _controller.shutdown()
+
+
+rumps_core.NSApp = _AppDelegate  # rumps instantiates this class inside run()
+
+
+class _MenuTarget(NSObject):
+    """Target for the main menu bar items (they need an Objective-C object)."""
+
+    def openSettings_(self, _sender):
+        _controller.open_settings()
+
+    def toggleVideo_(self, _sender):
+        _controller.set_flag("show_video", not _controller.settings.flags["show_video"])
+
+    def toggleWatching_(self, _sender):
+        _controller.toggle_watching()
+
+
+def _menu_item(title: str, action: str | None, key: str = "", target=None,
+               modifiers: int = NSEventModifierFlagCommand) -> NSMenuItem:
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+    item.setKeyEquivalentModifierMask_(modifiers)
+    if target is not None:
+        item.setTarget_(target)
+    return item
 
 
 def single_instance_or_exit():
-    """Keep one menu bar icon even if the Desktop app is clicked twice."""
     handle = open(LOCK_FILE, "w")  # noqa: SIM115 - stays open to hold the lock
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        SHOW_REQUEST.touch()  # ask the running copy to show itself, then leave
+        SHOW_REQUEST.touch()  # ask the running copy to show its settings, then leave
         sys.exit(0)
-    return handle  # must stay open for the lock to hold
+    return handle
 
 
-class _ReopenAwareDelegate(rumps_core.NSApp):
-    """rumps' app delegate, plus: clicking the Desktop app while it runs shows a pop-up."""
-
-    def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
-        SHOW_REQUEST.touch()
-        return True
-
-
-rumps_core.NSApp = _ReopenAwareDelegate  # rumps instantiates this class inside run()
-
-
-class DeskGuardMenu(rumps.App):
+class DeskGuard(rumps.App):
     def __init__(self) -> None:
         super().__init__("Desk Guard", title=ICON_OFF, quit_button=None)
-        self.placed = False
         self.settings = cfg.load(SETTINGS_FILE)
-        self.restart_at: float | None = None  # pending restart to apply new settings
-        self.settings_mtime = self._settings_mtime()
-        self.child: subprocess.Popen | None = None
-        self.blocked = False  # camera permission missing; keep retrying
-        self.retry_ticks = 0
-        self.status = rumps.MenuItem("Stopped")
-        self.toggle = rumps.MenuItem(START, callback=self.on_toggle)
-        self.switches: dict[str, rumps.MenuItem] = {}
-        self.lock_items: dict[int, rumps.MenuItem] = {}
-        self.sensitivity_items: dict[str, rumps.MenuItem] = {}
-        self.menu = [self.status, self.toggle,
-                     rumps.MenuItem(SETTINGS, callback=lambda _: open_settings_window(),
-                                    key=","), None,
-                     self._switch_item("show_video", VIDEO),
+        self.watcher = Watcher(self.settings, on_status=self._status_from_watcher)
+        self.api = SettingsApi(SETTINGS_FILE, ROOT, host=self, opener=subprocess.Popen)
+        self.state = "stopped"
+        self.user_stopped = False
+        self.quitting = False
+        self.start_pending = False  # the last run is still shutting down; start when it has
+        self.warned_camera = False
+        self.retry_in = 0.0
+        self.last_seq = 0
+        self.placed = False
+        self.video: VideoWindow | None = None
+        self.panel: SettingsPanel | None = None
+        self._target = _MenuTarget.alloc().init()
+        self.status_item = rumps.MenuItem(STATUS_LINE["stopped"])
+        self.toggle_item = rumps.MenuItem(START, callback=lambda _: self.toggle_watching())
+        self.video_item = rumps.MenuItem(VIDEO, callback=lambda _: self.set_flag(
+            "show_video", not self.settings.flags["show_video"]))
+        self.menu = [self.status_item, self.toggle_item, self.video_item, None,
                      rumps.MenuItem(ENABLE_ALL, callback=lambda _: self.set_all(True)),
                      rumps.MenuItem(DISABLE_ALL, callback=lambda _: self.set_all(False)),
-                     None, self._features_menu(), self._gestures_menu(), self._lock_menu(),
-                     None, rumps.MenuItem(GUIDE, callback=self.on_guide),
-                     rumps.MenuItem(RELEARN, callback=self.on_relearn), None,
-                     rumps.MenuItem(CAUGHT, callback=self.on_caught),
-                     rumps.MenuItem(LOG, callback=self.on_log), None,
-                     rumps.MenuItem(QUIT, callback=self.on_quit)]
-        self._sync_checkmarks()
-        self.timer = rumps.Timer(self.on_poll, POLL_S)
-        self.timer.start()
-        self.apply_timer = rumps.Timer(self.on_apply_tick, APPLY_TICK_S)
-        self.apply_timer.start()
-        self.start()
+                     rumps.MenuItem(SETTINGS, callback=lambda _: self.open_settings(), key=","),
+                     None, rumps.MenuItem(QUIT, callback=lambda _: rumps.quit_application())]
+        self.frame_timer = rumps.Timer(self.on_frame_tick, FRAME_TICK_S)
+        self.poll_timer = rumps.Timer(self.on_poll, POLL_S)
+        rumps.events.before_start.register(self.on_launch)
 
-    # ---------- menu building ----------
-    def _switch_item(self, key: str, title: str) -> rumps.MenuItem:
-        item = rumps.MenuItem(title, callback=lambda _, k=key: self.on_switch(k))
-        self.switches[key] = item
-        return item
+    # ---------- start-up ----------
+    def on_launch(self) -> None:
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        use_desk_guard_icon()  # matters when started from Terminal; the .app has its own
+        self._build_main_menu(app)
+        self.video = VideoWindow(on_settings=self.open_settings,
+                                 on_pin=lambda on: self.set_flag("video_on_top", on),
+                                 on_close=lambda: self.set_flag("show_video", False),
+                                 on_key=self.on_video_key)
+        self.panel = SettingsPanel(self.api)
+        toasts = Toasts()
+        macos.set_popup_handler(lambda *args: AppHelper.callAfter(toasts.show, *args))
+        self._sync_ui()
+        self.frame_timer.start()
+        self.poll_timer.start()
+        self.start_watching()
+        app.activateIgnoringOtherApps_(True)
 
-    def _features_menu(self) -> rumps.MenuItem:
-        parent = rumps.MenuItem(FEATURES_MENU)
-        parent.update([self._switch_item(k, title) for k, title in cfg.FEATURES.items()])
-        return parent
+    def _build_main_menu(self, app) -> None:
+        cmd, opt, shift = (NSEventModifierFlagCommand, NSEventModifierFlagOption,
+                           NSEventModifierFlagShift)
+        menus = (
+            ("Desk Guard", [
+                _menu_item("About Desk Guard", "orderFrontStandardAboutPanel:"), None,
+                _menu_item(SETTINGS, "openSettings:", ",", self._target), None,
+                _menu_item("Hide Desk Guard", "hide:", "h"),
+                _menu_item("Hide Others", "hideOtherApplications:", "h", modifiers=cmd | opt),
+                _menu_item("Show All", "unhideAllApplications:"), None,
+                _menu_item(QUIT, "terminate:", "q")]),
+            ("Edit", [
+                _menu_item("Undo", "undo:", "z"),
+                _menu_item("Redo", "redo:", "z", modifiers=cmd | shift), None,
+                _menu_item("Cut", "cut:", "x"), _menu_item("Copy", "copy:", "c"),
+                _menu_item("Paste", "paste:", "v"), _menu_item("Select All", "selectAll:", "a")]),
+            ("View", [
+                _menu_item(VIDEO, "toggleVideo:", "1", self._target),
+                _menu_item("Start / Stop Watching", "toggleWatching:", "", self._target)]),
+            ("Window", [
+                _menu_item("Minimize", "performMiniaturize:", "m"),
+                _menu_item("Close", "performClose:", "w"), None,
+                _menu_item("Bring All to Front", "arrangeInFront:")]),
+        )
+        main = NSMenu.alloc().init()
+        for title, items in menus:
+            menu = NSMenu.alloc().initWithTitle_(title)
+            for item in items:
+                menu.addItem_(item or NSMenuItem.separatorItem())
+            holder = NSMenuItem.alloc().init()
+            holder.setSubmenu_(menu)
+            main.addItem_(holder)
+            if title == "Window":
+                app.setWindowsMenu_(menu)
+        app.setMainMenu_(main)
 
-    def _gestures_menu(self) -> rumps.MenuItem:
-        parent = rumps.MenuItem(GESTURES_MENU)
-        on = rumps.MenuItem(GROUP_ON, callback=lambda _: self.set_gestures(True))
-        off = rumps.MenuItem(GROUP_OFF, callback=lambda _: self.set_gestures(False))
-        switches = [self._switch_item(k, title) for k, title in cfg.GESTURES.items()]
-        for level, seconds in cfg.SENSITIVITY.items():
-            self.sensitivity_items[level] = rumps.MenuItem(
-                SENSITIVITY_TITLE.format(level=level, seconds=seconds),
-                callback=lambda _, lv=level: self.on_sensitivity(lv))
-        parent.update([on, off, None, switches[0], None, *switches[1:], None,
-                       *self.sensitivity_items.values()])
-        return parent
-
-    def _lock_menu(self) -> rumps.MenuItem:
-        parent = rumps.MenuItem(LOCK_MENU)
-        for seconds in cfg.LOCK_CHOICES:
-            self.lock_items[seconds] = rumps.MenuItem(
-                f"{seconds} seconds", callback=lambda _, s=seconds: self.on_lock_after(s))
-        parent.update(list(self.lock_items.values()))
-        return parent
-
-    # ---------- child process ----------
-    def running(self) -> bool:
-        return self.child is not None and self.child.poll() is None
-
-    def command(self) -> list[str]:
-        return [sys.executable, "-m", "webcam_fun.desk", *cfg.to_args(self.settings)]
-
-    def start(self) -> None:
-        if self.running():
+    # ---------- watching ----------
+    def start_watching(self) -> None:
+        """Ask for the camera the macOS way (main thread), then start the watcher."""
+        if self.quitting:
             return
-        with open(LOG_FILE, "a") as log:
-            self.child = subprocess.Popen(self.command(), cwd=ROOT, stdout=log, stderr=log)
-        self._refresh()
+        self.user_stopped = False
+        av = AVFoundation.AVCaptureDevice
+        status = av.authorizationStatusForMediaType_(AVFoundation.AVMediaTypeVideo)
+        if status == AV_AUTHORIZED:
+            self._start_watcher()
+        elif status == AV_NOT_DETERMINED:
+            self._show_state("starting")
+            av.requestAccessForMediaType_completionHandler_(
+                AVFoundation.AVMediaTypeVideo,
+                lambda granted: AppHelper.callAfter(self._after_camera_prompt, bool(granted)))
+        else:
+            self._show_state("camera blocked")
 
-    def stop(self) -> None:
-        self.blocked, self.retry_ticks = False, 0
-        if not self.running():
+    def _after_camera_prompt(self, granted: bool) -> None:
+        if self.quitting or self.user_stopped:
             return
-        self.child.terminate()
+        if granted:
+            self._start_watcher()
+        else:
+            self._show_state("camera blocked")
+
+    def _start_watcher(self) -> None:
+        self.start_pending = not self.watcher.start()
+        if self.start_pending:
+            self._show_state("starting")
+
+    def stop_watching(self) -> None:
+        self.user_stopped = True
+        self.start_pending = False
+        self.watcher.stop()
+
+    def shutdown(self) -> None:
+        self.quitting = True
+        self.frame_timer.stop()
+        self.poll_timer.stop()
+        self.watcher.stop()
+
+    def _status_from_watcher(self, status: str) -> None:
+        AppHelper.callAfter(self._show_state, status)  # watcher thread -> main thread
+
+    def _show_state(self, status: str) -> None:
+        self.state = status
+        if status == "camera blocked" and not self.warned_camera:
+            self.warned_camera = True
+            macos.popup("Desk Guard needs the camera",
+                        "Turn on Desk Guard under Camera in the window that just opened. "
+                        "It starts by itself once allowed.", AMBER, 10)
+            subprocess.Popen(["open", CAMERA_SETTINGS_URL])
+        if status == "watching" and self.warned_camera:
+            self.warned_camera = False
+            macos.popup("Desk Guard", "Camera allowed. Watching now.", GREEN)
+        self.retry_in = RETRY_S if status == "camera blocked" else 0.0
+        self._sync_ui()
+
+    # ---------- timers ----------
+    def on_frame_tick(self, _) -> None:
+        if self.video is None or not self.video.visible or self.state != "watching":
+            return
+        frame, seq = self.watcher.latest(self.last_seq)
+        if frame is not None:
+            self.last_seq = seq
+            self.video.show_frame(frame)
+
+    def on_poll(self, _) -> None:
+        if QUIT_ALL_REQUEST.exists():
+            QUIT_ALL_REQUEST.unlink(missing_ok=True)
+            rumps.quit_application()
+            return
+        if SHOW_REQUEST.exists():
+            SHOW_REQUEST.unlink(missing_ok=True)
+            self.open_settings()
+        self._place_icon()
+        if self.start_pending and not self.user_stopped:
+            self._start_watcher()
+        if self.state == "camera blocked" and not self.user_stopped:
+            self.retry_in -= POLL_S
+            if self.retry_in <= 0:
+                self.retry_in = RETRY_S
+                self.start_watching()
+
+    # ---------- the Host interface used by the settings window ----------
+    def status(self) -> str:
+        return self.state
+
+    def apply_settings(self, settings: cfg.Settings) -> None:
+        self.settings = settings
+        self.watcher.apply(settings)
+        self._sync_ui()
+
+    def toggle_watching(self) -> None:
+        if self.watcher.running or self.start_pending:
+            self.stop_watching()
+        else:
+            self.start_watching()
+
+    def relearn_face(self) -> None:
+        if self.watcher.running:
+            self.watcher.key(ord("f"))
+        else:
+            try:
+                forget_profile()
+            except OSError as e:
+                macos.popup("Desk Guard", f"Could not forget the saved face: {e}", AMBER)
+                return
+        macos.popup("Desk Guard", "Look at the camera on your own for a few seconds so I can "
+                    "learn your face.", GREEN)
+
+    def recalibrate_posture(self) -> None:
+        self.watcher.key(ord("c"))
+
+    # ---------- changes from the menus and the video window ----------
+    def change(self, new: cfg.Settings) -> None:
+        if new == self.settings:
+            return
         try:
-            self.child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.child.kill()
-        self._refresh()
+            cfg.save(new, SETTINGS_FILE)
+        except OSError as e:
+            print(f"could not save settings: {e}", file=sys.stderr, flush=True)
+            macos.popup("Desk Guard", f"Settings not saved: {e.strerror or e}", AMBER)
+        self.apply_settings(new)
 
-    # ---------- menu callbacks ----------
-    def on_toggle(self, _) -> None:
-        self.stop() if self.running() else self.start()
-
-    def on_switch(self, key: str) -> None:
-        self.change(cfg.toggled(self.settings, key))
+    def set_flag(self, key: str, on: bool) -> None:
+        self.change(self.settings.with_flags({key: on}))
 
     def set_all(self, on: bool) -> None:
         self.change(cfg.with_all(self.settings, on))
 
-    def set_gestures(self, on: bool) -> None:
-        self.change(cfg.with_group(self.settings, cfg.GESTURE_SWITCHES, on))
-
-    def on_sensitivity(self, level: str) -> None:
-        self.change(self.settings.with_sensitivity(level))
-
-    def on_lock_after(self, seconds: int) -> None:
-        self.change(self.settings.with_lock_after(seconds))
-
-    def change(self, new: cfg.Settings) -> None:
-        """Save new settings, update the checkmarks, and restart the watcher to apply them."""
-        if new == self.settings:
+    def open_settings(self) -> None:
+        if self.panel is None:
             return
-        self.settings = new
-        try:
-            cfg.save(new, SETTINGS_FILE)
-        except OSError as e:
-            print(f"could not save settings: {e}", file=sys.stderr)
-            macos.popup("Desk Guard", f"Settings not saved: {e}", "#f5a623")
-        self.settings_mtime = self._settings_mtime()
-        self._applied()
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self.panel.show()
 
-    def _applied(self) -> None:
-        self._sync_checkmarks()
-        if self.running():  # options are command-line flags, so restart to apply
-            self.restart_at = time.monotonic() + RESTART_DEBOUNCE_S
-
-    @staticmethod
-    def _settings_mtime() -> float | None:
-        try:
-            return SETTINGS_FILE.stat().st_mtime
-        except OSError:
-            return None
-
-    @staticmethod
-    def _take_request(name: str) -> bool:
-        path = ROOT / name
-        if not path.exists():
-            return False
-        path.unlink(missing_ok=True)
-        return True
-
-    def on_apply_tick(self, _) -> None:
-        mtime = self._settings_mtime()
-        if mtime != self.settings_mtime:  # changed in the settings window
-            self.settings_mtime = mtime
-            new = cfg.load(SETTINGS_FILE)
-            if new != self.settings:
-                self.settings = new
-                self._applied()
-        if self._take_request(TOGGLE_REQUEST):
-            self.on_toggle(None)
-        if self._take_request(RELEARN_REQUEST):
-            self.on_relearn(None)
-        if self.restart_at is None or time.monotonic() < self.restart_at:
-            return
-        self.restart_at = None
-        if self.running():
-            self.stop()
-            self.start()
-
-    def on_guide(self, _) -> None:
-        guide = GESTURE_HELP.split("\n\n", 1)[1].rsplit("\nKeys:", 1)[0].strip()
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)  # else it opens behind
-        rumps.alert("Desk Guard gestures",
-                    f"{guide}\n\nHold time is set under Gestures. Mute needs a longer hold "
-                    "so a relaxed hand doesn't mute you.")
-
-    def on_relearn(self, _) -> None:
-        """Forget the saved face; the watcher learns it again as soon as it sees one face."""
-        was_running = self.running()
-        self.stop()
-        try:
-            forget_profile()
-        except OSError as e:
-            macos.popup("Desk Guard", f"Could not forget the saved face: {e}", "#f5a623")
-            return
-        finally:
-            if was_running:
-                self.start()
-        macos.popup("Desk Guard", "Look at the camera on your own for a few seconds so I can "
-                    "learn your face.", "#30a46c")
-
-    def on_caught(self, _) -> None:
-        CAUGHT_DIR.mkdir(exist_ok=True)
-        subprocess.Popen(["open", str(CAUGHT_DIR)])
-
-    def on_log(self, _) -> None:
-        LOG_FILE.touch()
-        subprocess.Popen(["open", "-t", str(LOG_FILE)])
-
-    def on_quit(self, _) -> None:
-        self.stop()
-        rumps.quit_application()
-
-    def on_poll(self, _) -> None:
-        if QUIT_ALL_REQUEST.exists():  # quit from the Dock or q in the video window
-            QUIT_ALL_REQUEST.unlink(missing_ok=True)
-            self.on_quit(None)
-            return
-        self._place_icon()
-        self._handle_show_request()
-        self._refresh()  # picks up 'q' pressed in the video window, or a crash
-        code = None if self.child is None else self.child.poll()
-        if code == CAMERA_ERROR_EXIT and not self.blocked:
-            self.blocked = True
-            self.status.title = "Camera not allowed yet"
-            macos.popup("Desk Guard needs the camera",
-                        "Turn on Desk Guard under Camera in the window that just opened. "
-                        "It starts by itself once allowed.", "#f5a623", 10)
-            subprocess.Popen(["open", CAMERA_SETTINGS_URL])
-        if not self.blocked:
-            return
-        if self.running():
-            # Survived a full poll after a retry: the camera works now.
-            self.blocked, self.retry_ticks = False, 0
-            macos.popup("Desk Guard", "Camera allowed. Watching now.", "#30a46c")
-            return
-        self.retry_ticks += 1
-        if self.retry_ticks * POLL_S >= RETRY_S:
-            self.retry_ticks = 0
-            self.start()
+    def on_video_key(self, char: str) -> bool:
+        if char == "s":
+            self.open_settings()
+            return True
+        if char in WATCHER_KEYS:
+            self.watcher.key(ord(char))
+            return True
+        return False
 
     # ---------- display ----------
+    def _sync_ui(self) -> None:
+        flags = self.settings.flags
+        on = self.state == "watching"
+        self.title = ICON_ON if on else ICON_OFF
+        self.status_item.title = STATUS_LINE.get(self.state, self.state)
+        self.toggle_item.title = STOP if self.watcher.running else START
+        self.video_item.state = flags["show_video"]
+        if self.video is not None:
+            self.video.set_on_top(flags["video_on_top"])
+            self.video.set_message(None if on else VIDEO_MESSAGE.get(self.state))
+            if flags["show_video"] and not self.video.visible:
+                self.last_seq = 0
+                self.video.show()
+            elif not flags["show_video"] and self.video.visible:
+                self.video.hide()
+        if self.panel is not None:
+            self.panel.push_state()
+
     def _place_icon(self) -> None:
-        nsapp = getattr(self, "_nsapp", None)  # created by rumps inside run()
+        nsapp = getattr(self, "_nsapp", None)
         if self.placed or nsapp is None:
             return
         defaults = NSUserDefaults.standardUserDefaults()
         key = f"NSStatusItem Preferred Position {ITEM_AUTOSAVE_NAME}"
-        if defaults.objectForKey_(key) is None:  # keep the spot if you cmd-dragged it
+        if defaults.objectForKey_(key) is None:
             defaults.setObject_forKey_(ITEM_PREFERRED_POSITION, key)
         nsapp.nsstatusitem.setAutosaveName_(ITEM_AUTOSAVE_NAME)
         self.placed = True
 
-    def _handle_show_request(self) -> None:
-        if not SHOW_REQUEST.exists():
-            return
-        SHOW_REQUEST.unlink(missing_ok=True)
-        open_settings_window()  # clicking the app while it runs opens its settings
-
-    def _sync_checkmarks(self) -> None:
-        flags = self.settings.flags
-        for key, item in self.switches.items():
-            item.state = flags[key]
-        gestures_on = flags["gestures"]
-        for key in cfg.GESTURE_SWITCHES[1:]:  # greyed out while gestures are off
-            self.switches[key].set_callback(
-                (lambda _, k=key: self.on_switch(k)) if gestures_on else None)
-        for seconds, item in self.lock_items.items():
-            item.state = seconds == self.settings.lock_after
-        for level, item in self.sensitivity_items.items():
-            item.state = level == self.settings.sensitivity
-
-    def _refresh(self) -> None:
-        on = self.running()
-        self.title = ICON_ON if on else ICON_OFF
-        self.toggle.title = STOP if on else START
-        self.status.title = "Watching" if on else "Stopped"
-        status = "watching" if on else "camera blocked" if self.blocked else "stopped"
-        try:
-            (ROOT / STATUS_NAME).write_text(status + "\n")
-        except OSError as e:
-            print(f"could not write status: {e}", file=sys.stderr)
-
 
 def main() -> None:
+    global _controller
     _lock = single_instance_or_exit()
-    QUIT_ALL_REQUEST.unlink(missing_ok=True)  # stale request from an earlier run
-    hide_from_dock()
-    DeskGuardMenu().run()
+    QUIT_ALL_REQUEST.unlink(missing_ok=True)
+    objc.options.verbose = True  # print Objective-C exceptions from callbacks to the log
+    _controller = DeskGuard()
+    _controller.run()
 
 
 if __name__ == "__main__":

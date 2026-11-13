@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Builds "Desk Guard.app", a clickable launcher for the menu bar controller.
+# Builds "Desk Guard.app". Its executable is a small C program (tools/launcher.c) that
+# runs the Python app inside its own process, so macOS treats Desk Guard as a real app:
+# its own Dock icon, name, menu bar and permissions.
 # Usage: tools/make_app.sh [destination dir]   (default: ~/Desktop)
 #
-# The app looks for the project in the folder that contains it (so the copy at the
-# repo root works from any clone); if it lives elsewhere, e.g. on the Desktop, it
-# falls back to the project path it was built from.
+# The app uses the project in the folder that contains it if there is one, else the
+# project it was built from. Code changes don't need a rebuild; a new venv Python does.
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,37 +24,33 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Desk Guard</string>
   <key>CFBundleDisplayName</key><string>Desk Guard</string>
   <key>CFBundleIdentifier</key><string>local.webcamfun.deskguard</string>
-  <key>CFBundleExecutable</key><string>deskguard</string>
+  <key>CFBundleExecutable</key><string>Desk Guard</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
+  <key>LSUIElement</key><false/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Desk Guard switches and closes browser tabs for your gestures and when someone sits with you.</string>
   <key>NSCameraUsageDescription</key>
   <string>Desk Guard watches for people behind you, locks the Mac when you leave, checks your posture and reads hand gestures.</string>
 </dict>
 </plist>
 PLIST
 
-cat > "$APP/Contents/MacOS/deskguard" <<SCRIPT
-#!/bin/bash
-# Project = the folder containing this .app if it has the code, else the build-time path.
-APP_PARENT="\$(cd "\$(dirname "\$0")/../../.." && pwd)"
-if [ -d "\$APP_PARENT/webcam_fun" ]; then
-  PROJECT="\$APP_PARENT"
-else
-  PROJECT="$PROJECT"
-fi
-PY="\$PROJECT/.venv/bin/python"
-if [ ! -x "\$PY" ]; then
-  osascript -e 'display alert "Desk Guard is not set up yet" message "Open Terminal in the desk-guard folder and run:  ./run desk\n\nThe first run installs everything. After that this app works."'
-  exit 1
-fi
-cd "\$PROJECT" || exit 1
-exec "\$PY" -m webcam_fun.menubar >> "\$PROJECT/desk.log" 2>&1
-SCRIPT
-chmod +x "$APP/Contents/MacOS/deskguard"
+PY="$PROJECT/.venv/bin/python"
+[ -x "$PY" ] || { echo "Run ./run desk once first to create the venv."; exit 1; }
+PYBIN="$(dirname "$(readlink -f "$PY")")"
+PYCONFIG="$PYBIN/python3.12-config"
+PYLIB="$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+[ -x "$PYCONFIG" ] || { echo "No python3.12-config next to $PYBIN"; exit 1; }
+clang -O2 -Wall $("$PYCONFIG" --includes) -DPROJECT_DIR="\"$PROJECT\"" \
+  "$PROJECT/tools/launcher.c" -L "$PYLIB" -lpython3.12 -Wl,-rpath,"$PYLIB" \
+  -o "$APP/Contents/MacOS/Desk Guard"
 
 # Icon: use the committed .icns; regenerate it only if missing.
 if [ ! -f "$ICNS" ]; then

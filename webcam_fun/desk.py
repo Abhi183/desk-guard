@@ -9,13 +9,16 @@ Click the gear in the top-right corner of the video window for settings.
 
 import argparse
 import math
+import subprocess
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import cv2
 import numpy as np
 
 from webcam_fun import macos, personal
+from webcam_fun import settings as cfg
 from webcam_fun.body import BODY_MIN_SHARE, BodyDetector
 from webcam_fun.dock import QUIT_ALL_REQUEST, on_dock_quit, use_desk_guard_icon
 from webcam_fun.gestures import (
@@ -35,7 +38,6 @@ from webcam_fun.identity import (
 from webcam_fun.posture import PostureJudge
 from webcam_fun.presence import AutoLock
 from webcam_fun.recognition import FaceId
-from webcam_fun.settings_window import open_settings_window
 from webcam_fun.vision import (
     ROOT,
     Box,
@@ -48,6 +50,7 @@ from webcam_fun.vision import (
 from webcam_fun.watch import ShoulderWatch
 
 WINDOW = "Desk Guard"
+APP_BUNDLE_ID = "local.webcamfun.deskguard"  # opening the app shows its settings window
 CAUGHT_DIR = ROOT / "caught"
 RED, GREEN, AMBER, GRAY, WHITE = (40, 40, 230), (80, 200, 80), (0, 170, 255), (150, 150, 150), (255, 255, 255)
 AMBER_HEX, GREEN_HEX = "#f5a623", "#30a46c"  # pop-up accent colors
@@ -66,7 +69,7 @@ POSTURE_TEXT = {"good": "posture ok", "too_close": "too close to the screen",
                 "no_face": "posture: -"}
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--lock-after", type=float, default=DEFAULT_LOCK_AFTER_S,
@@ -91,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--name", default="you",
                    help="what to call you on the box around your face (default: you)")
     p.add_argument("--camera", type=int, default=0)
-    args = check_gesture_options(p, p.parse_args())
+    args = check_gesture_options(p, p.parse_args(argv))
     args.name = clean_name(args.name)
     if args.lock_after < MIN_LOCK_AFTER_S:
         p.error(f"--lock-after must be at least {MIN_LOCK_AFTER_S} second")
@@ -120,6 +123,10 @@ class DeskApp:
             no_keys=args.no_keys, no_cursor=args.no_cursor, gestures_off=args.gestures_off,
             gesture_hold=args.gesture_hold))
         self.gesture_engine: GestureEngine | None = None
+        # Hand recognition runs on its own thread while OpenCV finds and recognises faces
+        # on this one, which takes about a third off each frame. It is collected before any
+        # other MediaPipe model runs, so two MediaPipe graphs never run at the same time.
+        self._gesture_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gestures")
         self.gesture_result = None
         self.quit_requested = False
         self.face_id = FaceId(self.on_face_learned)
@@ -132,7 +139,27 @@ class DeskApp:
         self.mouse: tuple[int, int] = (-1, -1)  # last pointer position over the video
         self.settings_opened_at = float("-inf")
         self._banner_color = GRAY
+        self.show_gear = True  # the app has a real gear button in the title bar instead
         self.frame_width = WINDOW_SIZE[0]
+
+    # ---------- live settings ----------
+    def apply(self, settings: cfg.Settings) -> None:
+        """Take new settings while running, without reloading anything."""
+        flags = settings.flags
+        lock_after = float(settings.lock_after)
+        if flags["auto_lock"] != self.lock_enabled or lock_after != self.args.lock_after:
+            self.lock, self.lock_warned = AutoLock(lock_after), False
+        if flags["privacy"] and self.args.no_privacy:
+            self.company = CompanyWatch(self.args.company_after)  # fresh countdown
+        self.args = argparse.Namespace(**{
+            **vars(self.args), "no_guard": not flags["guard"], "no_posture": not flags["posture"],
+            "no_privacy": not flags["privacy"], "name": settings.name, "lock_after": lock_after})
+        self.lock_enabled = flags["auto_lock"]
+        self.muted = not flags["sounds"]
+        self.gestures_enabled = flags["gestures"]
+        self.gesture_app.configure(
+            disabled={key for key in cfg.GESTURE_ACTIONS if not flags[key]},
+            cursor=flags["cursor"], hold=cfg.SENSITIVITY[settings.sensitivity])
 
     # ---------- events ----------
     @staticmethod
@@ -229,9 +256,12 @@ class DeskApp:
 
     # ---------- per frame ----------
     def step(self, frame: np.ndarray, now: float) -> list[Box]:
+        hands = self._gesture_pool.submit(self._recognize_hands, frame, now) \
+            if self.gestures_enabled else None
         detected: list[Face] = self.detector.detect_faces(frame)
         faces = [face.box for face in detected]
         self.me = self.face_id.identify(frame, detected, now)
+        hand_result = self._collect_hands(hands)
         if not self.args.no_guard and self.watch.update(len(faces) > 1):
             self.on_intruder(frame, now)
         if not self.args.no_privacy and self.company.update(has_company(faces), now):
@@ -253,7 +283,7 @@ class DeskApp:
                 macos.alert("Desk Guard", "Posture saved",
                             "This is your good posture. I will nudge you if you drift",
                             GREEN_HEX)
-        self._step_gestures(frame, faces, now)
+        self._step_gestures(frame, faces, now, hand_result)
         return faces
 
     def _owner_at_desk(self, frame: np.ndarray, faces: list[Box], now: float) -> bool:
@@ -270,15 +300,35 @@ class DeskApp:
         body_there = self.body_share is not None and self.body_share >= BODY_MIN_SHARE
         return self.owner.update(my_face, faces, body_there, now)
 
-    def _step_gestures(self, frame: np.ndarray, faces: list[Box], now: float) -> None:
-        my_box = self.me_tracker.update(faces[self.me] if self.me is not None else None, now)
-        if not self.gestures_enabled:
-            self.gesture_result = None
-            return
+    def _recognize_hands(self, frame: np.ndarray, now: float):
         if self.gesture_engine is None:
             self.gesture_engine = GestureEngine()  # loaded on first use (~1s)
-        self.gesture_result = self.gesture_engine.process(frame, now)
-        hand = self._my_hand(self.gesture_result, faces, my_box, frame.shape)
+        return self.gesture_engine.process(frame, now)
+
+    def _collect_hands(self, hands: Future | None):
+        """The hand recognizer's result, or None. A MediaPipe failure costs one frame: the
+        recognizer is rebuilt on the next one instead of taking the whole watcher down."""
+        if hands is None:
+            return None
+        try:
+            return hands.result()
+        except RuntimeError as e:
+            self.log(f"hand recognizer failed, restarting it: {str(e).splitlines()[-1][:120]}")
+            broken, self.gesture_engine = self.gesture_engine, None
+            if broken is not None:
+                try:
+                    broken.close()
+                except RuntimeError:
+                    pass  # it is already broken; dropping it is all we need
+            return None
+
+    def _step_gestures(self, frame: np.ndarray, faces: list[Box], now: float,
+                       result) -> None:
+        my_box = self.me_tracker.update(faces[self.me] if self.me is not None else None, now)
+        self.gesture_result = result
+        if result is None:
+            return
+        hand = self._my_hand(result, faces, my_box, frame.shape)
         self.gesture_app.step(self.gesture_result, frame, now, hand=hand)
 
     def _my_hand(self, result, faces: list[Box], my_box: Box | None,
@@ -298,6 +348,7 @@ class DeskApp:
         return None
 
     def close(self) -> None:
+        self._gesture_pool.shutdown(wait=True)
         if self.gesture_engine is not None:
             self.gesture_engine.close()
         if self.body is not None:
@@ -348,7 +399,7 @@ class DeskApp:
             return
         self.settings_opened_at = now
         try:
-            open_settings_window()
+            subprocess.Popen(["open", "-b", APP_BUNDLE_ID])
         except OSError as e:
             self.log(f"could not open settings: {e}")
             self.say("could not open settings, see the log", now)
@@ -409,7 +460,8 @@ class DeskApp:
         cv2.rectangle(img, (0, 0), (img.shape[1], BANNER_H), color, -1)
         put_text(img, text, (14, 31), WHITE, scale=0.9)
         self._banner_color = color
-        self._draw_gear(img)
+        if self.show_gear:
+            self._draw_gear(img)
 
     def _draw_status(self, img: np.ndarray, now: float) -> None:
         h = img.shape[0]

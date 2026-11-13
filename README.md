@@ -1,6 +1,6 @@
 # Desk Guard
 
-A macOS menu bar app that watches your webcam while you work. It warns you when someone is
+A macOS app that watches your webcam while you work. It warns you when someone is
 looking over your shoulder, locks the Mac when you walk away, nudges you about posture, and
 lets you control volume, browser tabs and media playback with hand gestures. It learns your
 face, so only your hands can gesture, and it closes Messages, WhatsApp and Instagram when
@@ -10,7 +10,7 @@ Built and tested on an Apple Silicon MacBook Pro with macOS 26.
 
 ## Setup
 
-You need Python 3.12 and [uv](https://docs.astral.sh/uv/).
+You need [uv](https://docs.astral.sh/uv/) and the Xcode command line tools (for `clang`).
 
 ```
 git clone https://github.com/Abhi183/desk-guard.git
@@ -18,10 +18,14 @@ cd desk-guard
 ./run desk
 ```
 
-The first `./run` creates `.venv`, installs the packages in `requirements.txt` and downloads
-the face recognition model (37 MB) into `models/`. Then build
-the clickable app with `tools/make_app.sh` (puts **Desk Guard.app** on your Desktop, or pass a
-folder, e.g. `tools/make_app.sh .` for the repo folder) and launch it from there.
+The first `./run` creates `.venv` with uv's native Python 3.12 (an Intel Python under
+Rosetta runs the models about half as fast), installs `requirements.txt` and downloads the
+face recognition model (37 MB). Then:
+
+```
+tools/make_app.sh      # builds Desk Guard.app on your Desktop (or pass a folder)
+./run app              # opens it (builds it first if it is missing)
+```
 
 ## What it does
 
@@ -103,8 +107,8 @@ A photo of you counts as you: hold one up and its box gets your name too. If the
 new glasses, press `f` in the video window or pick "Relearn my face" in the menu, then look at
 the camera on your own.
 
-To see your name on the box, add `"name": "Alex"` to `menubar_settings.json` (or pass
-`--name Alex` to `./run desk`) and restart. Plain letters only, 20 characters at most.
+To see your name on the box, set it under Settings > Face & identity (or pass `--name Alex`
+to `./run desk`). Plain letters only, 20 characters at most.
 
 ### Company
 
@@ -115,55 +119,47 @@ quit the same way Cmd+Q does. It runs once per visit: if you reopen Messages whi
 still there, it stays open until they leave and someone sits down again. The apps and sites
 are listed at the top of `webcam_fun/personal.py`.
 
-## Settings window
+## The app
 
-Click the gear in the top-right corner of the video window (or press `s`), click Desk
-Guard.app while it's running, or pick Settings... (cmd-,) in the menu bar. The window has:
+Desk Guard.app is one process with its own Dock icon, menu bar, video window and settings
+window. Its executable (`tools/launcher.c`) runs Python inside itself, so macOS sees a real
+app called Desk Guard rather than "Python". The watcher runs on background threads; one
+thread keeps only the newest camera frame so the video never falls behind, and hand
+recognition runs alongside face detection.
 
-- Overview: watching status with start/stop, Enable all / Disable all features, and a quick
-  switch for every feature
+Settings apply instantly, with nothing restarted, and are saved to `menubar_settings.json`.
+
+**Settings window**: Cmd-, , the gear in the video window's title bar, `s` in the video
+window, clicking the Dock icon, or Settings... in the eye menu.
+
+- Overview: status with start/stop, Enable all / Disable all features, a switch for each
 - Security: auto-lock with lock delay (2/5/10/30 s), shoulder-surfer alarm, close personal
   apps with company
-- Wellbeing: posture alerts, sounds
+- Wellbeing: posture alerts, sounds, recalibrate posture
 - Gestures: master switch, one switch per gesture, Enable all / Disable all, hold time
+  (fast 0.25 s, normal 0.4 s, careful 0.7 s)
 - Face & identity: your name, relearn my face
-- Display: video window on/off
+- Display: video window on/off, keep it on top
 - Data & logs: caught photos, selfies, activity log
 
-Changes save to `menubar_settings.json` right away and the watcher restarts with them about a
-second later. The window is `webcam_fun/settings_window.py` (pywebview) with its UI in
-`settings_ui.html`.
-
-## Menu bar
-
-The eye icon has:
-
-- Start / stop watching, and Show video window
-- Enable all features / Disable all features (everything below on or off at once)
-- Features: lock when I leave, shoulder-surfer alarm, posture alerts, close personal apps
-  when someone sits with me, sounds
-- Gestures: enable or disable all gestures, the gesture master switch, one switch per
-  gesture (volume, mute, selfie, play/pause, tabs, pointer), and the hold time
-  (fast 0.25 s, normal 0.4 s, careful 0.7 s)
-- Lock after: 2, 5, 10 or 30 seconds
-- Gesture guide, relearn my face, open caught photos, open log, quit
-
-Choices are saved in `menubar_settings.json` and applied by restarting the watcher about a
-second after your last click, so flipping several switches restarts it once. Quitting from
-the Dock or pressing `q` in the video window closes the whole app; "Stop watching" only pauses.
-
-Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate posture,
+**Video window**: Cmd-1 shows or hides it, and so does the red close button; closing it
+never stops watching. The pin in the title bar floats it above other windows, on every Space
+and over full-screen apps. Keys: `s` settings, `m` mute, `c` recalibrate posture,
 `l` auto-lock on/off, `g` gestures on/off, `f` relearn my face.
+
+**Eye menu** in the menu bar: status, start/stop, show video window, Enable all / Disable all
+features, settings, quit. Cmd-Q quits from anywhere in the app.
 
 ## Permissions
 
-- **Camera**: macOS asks the first time. It is granted per app, so Terminal and Desk Guard.app
-  each need it.
+- **Camera**: Desk Guard asks the first time it starts. It is granted per app, so Terminal
+  (for `./run desk`) and Desk Guard.app each need it. Rebuilding the app with
+  `tools/make_app.sh` gives it a new signature, so macOS asks again.
 - **Accessibility**: needed for tab switching, moving the pointer and the volume pop-up (the app presses the real
-  keys). Add Desk Guard (or Python) under System Settings > Privacy & Security > Accessibility.
-- **Automation**: the first time a visitor triggers tab closing, macOS asks whether Python may
+  keys). Add Desk Guard under System Settings > Privacy & Security > Accessibility.
+- **Automation**: the first time a visitor triggers tab closing, macOS asks whether Desk Guard may
   control Chrome (or Brave, Safari). Say yes, or tabs stay open. Quitting apps needs nothing.
-- **Menu bar icon missing**: macOS 26 hides new menu bar items. Turn on **Python** under
+- **Menu bar icon missing**: macOS 26 hides new menu bar items. Turn on **Desk Guard** under
   System Settings > Menu Bar > Allow in the Menu Bar.
 
 ## Known limits
@@ -187,9 +183,12 @@ Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate postur
 
 ## Layout
 
-- `webcam_fun/desk.py` main loop: faces, lock, posture, gestures, video window
-- `webcam_fun/menubar.py` menu bar app that starts and stops `desk.py`
-- `webcam_fun/settings_window.py`, `settings_ui.html` the settings window
+- `webcam_fun/menubar.py` the app: menus, windows, camera permission, Dock
+- `webcam_fun/engine.py` watcher threads: newest-frame camera reader, DeskApp loop
+- `webcam_fun/desk.py` DeskApp (faces, lock, posture, gestures) and the Terminal version
+  with an OpenCV window (`./run desk`)
+- `webcam_fun/video_window.py`, `settings_panel.py`, `native_toast.py` AppKit windows
+- `webcam_fun/settings_ui.html`, `settings_api.py` settings page and what it may call (tested)
 - `webcam_fun/settings.py` saved options and the `desk.py` flags they turn into (unit tested)
 - `webcam_fun/gestures.py`, `pointing.py`, `gesture_trigger.py` gesture recognition and actions
 - `webcam_fun/cursor.py` pointer control logic (unit tested)
@@ -199,7 +198,7 @@ Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate postur
 - `webcam_fun/train_face.py` adds profile samples from saved photos (`./run train`)
 - `webcam_fun/personal.py` quits personal apps and closes their browser tabs
 - `webcam_fun/macos.py`, `dock.py`, `toast.py` macOS glue: lock, keys, pop-ups, Dock icon
-- `tools/make_app.sh` builds the `.app`; `tools/make_icon.py` draws the icon
+- `tools/make_app.sh` builds the `.app` around `tools/launcher.c`; `tools/make_icon.py` draws the icon
 - `models/` YuNet face detector and SFace face recognizer (opencv_zoo), MediaPipe
   `gesture_recognizer.task` and `selfie_segmenter.tflite`
 

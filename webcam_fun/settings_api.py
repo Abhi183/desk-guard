@@ -1,36 +1,29 @@
-"""Desk Guard settings window: a native macOS window (WKWebView via pywebview).
+"""What the settings window can read and do. Called from the window's JavaScript.
 
-    python -m webcam_fun.settings_window
-
-Opened from the gear in the video window, the `s` key, the menu bar, or by clicking
-Desk Guard.app while it runs. It edits menubar_settings.json; the menu bar app sees the
-change and restarts the watcher. Start/stop and "relearn my face" go to the menu bar app
-as request files, because it owns the watcher process.
+Pure Python with no AppKit, so it is unit tested. The app passes itself in as `host`;
+every change is saved to the settings file and handed to the host to apply right away.
 """
 
-import fcntl
-import subprocess
+import inspect
 import sys
-import threading
-import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from webcam_fun import settings as cfg
 from webcam_fun.identity import clean_name
-from webcam_fun.vision import ROOT
 
-UI_FILE = Path(__file__).with_name("settings_ui.html")
-SETTINGS_NAME = "menubar_settings.json"
-STATUS_NAME = ".status"                # written by the menu bar app
-TOGGLE_REQUEST = ".toggle_request"     # start / stop watching
-RELEARN_REQUEST = ".relearn_request"   # forget the face and learn it again
-FOCUS_REQUEST = ".settings_focus"      # a second launch asks this window to come forward
-LOCK_NAME = ".settings_window.lock"
 STATUSES = ("watching", "stopped", "starting", "camera blocked")
 GROUPS = {"features": tuple(cfg.FEATURES), "gestures": cfg.GESTURE_SWITCHES}
-WINDOW_SIZE, MIN_SIZE = (920, 640), (780, 540)
-FOCUS_POLL_S = 0.4
+FOLDERS = {"caught": "caught", "snaps": "snaps"}
+
+
+class Host(Protocol):
+    def status(self) -> str: ...
+    def apply_settings(self, settings: cfg.Settings) -> None: ...
+    def toggle_watching(self) -> None: ...
+    def relearn_face(self) -> None: ...
+    def recalibrate_posture(self) -> None: ...
+
 
 # What the window shows. Sections without items are custom pages drawn by the HTML.
 CATALOG = (
@@ -78,7 +71,9 @@ CATALOG = (
      "subtitle": "How Desk Guard shows itself.",
      "items": [
          {"key": "show_video", "label": "Video window",
-          "detail": "Show the live camera window. Off runs Desk Guard with pop-ups only."},
+          "detail": "Show the live camera window. Off keeps watching with pop-ups only."},
+         {"key": "video_on_top", "label": "Keep video on top",
+          "detail": "Float the video window above other windows."},
      ]},
     {"id": "data", "title": "Data & logs", "icon": "folder",
      "subtitle": "Everything stays on this Mac."},
@@ -94,18 +89,35 @@ def _fail(error: str) -> dict:
 
 
 class SettingsApi:
-    """Everything the window can do. Methods are called from JavaScript on worker threads."""
+    """Methods the window may call, by name. Everything else is refused."""
 
-    def __init__(self, root: Path = ROOT,
-                 opener: Callable[..., object] = subprocess.Popen) -> None:
+    CALLABLE = frozenset({
+        "get_state", "set_flag", "set_all", "set_group", "set_lock_after", "set_sensitivity",
+        "set_name", "toggle_watching", "relearn_face", "recalibrate_posture", "open_folder",
+        "open_log"})
+
+    def __init__(self, settings_file: Path, root: Path, host: Host,
+                 opener: Callable[[list[str]], object]) -> None:
+        self._file = settings_file
         self._root = root
-        self._file = root / SETTINGS_NAME
+        self._host = host
         self._open = opener
-        self._lock = threading.Lock()
+
+    def call(self, method: str, args: list) -> dict:
+        """Entry point for the JavaScript bridge."""
+        if method not in self.CALLABLE or not isinstance(args, list):
+            return _fail(f"unknown action: {method}")
+        handler = getattr(self, method)
+        try:
+            inspect.signature(handler).bind(*args)
+        except TypeError as e:  # wrong number of arguments from the page
+            return _fail(f"bad call to {method}: {e}")
+        return handler(*args)
 
     # ---------- reading ----------
     def get_state(self) -> dict:
         settings = cfg.load(self._file)
+        status = self._host.status()
         return {
             "flags": dict(settings.flags),
             "lock_after": settings.lock_after,
@@ -113,28 +125,22 @@ class SettingsApi:
             "sensitivity": settings.sensitivity,
             "sensitivity_levels": dict(cfg.SENSITIVITY),
             "name": settings.name,
-            "status": self._status(),
+            "status": status if status in STATUSES else "stopped",
             "catalog": CATALOG,
         }
 
-    def _status(self) -> str:
-        try:
-            text = (self._root / STATUS_NAME).read_text().strip()
-        except OSError:
-            return "stopped"
-        return text if text in STATUSES else "stopped"
-
     # ---------- changing settings ----------
     def _change(self, update: Callable[[cfg.Settings], cfg.Settings]) -> dict:
-        with self._lock:
-            try:
-                new = update(cfg.load(self._file))
-                cfg.save(new, self._file)
-            except (KeyError, ValueError) as e:
-                return _fail(str(e).strip("'\""))
-            except OSError as e:
-                print(f"settings: could not save: {e}", file=sys.stderr, flush=True)
-                return _fail(f"Could not save settings: {e.strerror or e}")
+        try:
+            new = update(cfg.load(self._file))
+        except (KeyError, ValueError) as e:
+            return _fail(str(e).strip("'\""))
+        try:
+            cfg.save(new, self._file)
+        except OSError as e:
+            print(f"settings: could not save: {e}", file=sys.stderr, flush=True)
+            return _fail(f"Could not save settings: {e.strerror or e}")
+        self._host.apply_settings(new)
         return _ok(self.get_state())
 
     def set_flag(self, key: str, on: bool) -> dict:
@@ -160,90 +166,37 @@ class SettingsApi:
         text = name.strip() if isinstance(name, str) else ""
         if text and clean_name(text) != text:
             return _fail("Use plain letters, 20 characters at most.")
-        return self._change(lambda s: s.with_name(clean_name(text)))
+        return self._change(lambda s: s.with_name(text))
 
-    # ---------- actions handled by the menu bar app ----------
-    def _request(self, name: str) -> dict:
-        try:
-            (self._root / name).touch()
-        except OSError as e:
-            return _fail(f"Could not reach Desk Guard: {e.strerror or e}")
+    # ---------- actions ----------
+    def toggle_watching(self) -> dict:
+        self._host.toggle_watching()
         return _ok(self.get_state())
 
-    def toggle_watching(self) -> dict:
-        return self._request(TOGGLE_REQUEST)
-
     def relearn_face(self) -> dict:
-        return self._request(RELEARN_REQUEST)
+        self._host.relearn_face()
+        return _ok(self.get_state())
 
-    def open_caught(self) -> dict:
-        return self._open_path(self._root / "caught", ["open"])
+    def recalibrate_posture(self) -> dict:
+        self._host.recalibrate_posture()
+        return _ok(self.get_state())
 
-    def open_snaps(self) -> dict:
-        return self._open_path(self._root / "snaps", ["open"])
+    def open_folder(self, name: str) -> dict:
+        if name not in FOLDERS:
+            return _fail(f"unknown folder: {name}")
+        path = self._root / FOLDERS[name]
+        try:
+            path.mkdir(exist_ok=True)
+            self._open(["open", str(path)])
+        except OSError as e:
+            return _fail(f"Could not open {name}: {e.strerror or e}")
+        return _ok(self.get_state())
 
     def open_log(self) -> dict:
         log = self._root / "desk.log"
-        log.touch()
-        return self._open_path(log, ["open", "-t"])
-
-    def _open_path(self, path: Path, command: list[str]) -> dict:
         try:
-            if command == ["open"]:
-                path.mkdir(exist_ok=True)
-            self._open([*command, str(path)])
+            log.touch()
+            self._open(["open", "-t", str(log)])
         except OSError as e:
-            return _fail(f"Could not open {path.name}: {e.strerror or e}")
+            return _fail(f"Could not open the log: {e.strerror or e}")
         return _ok(self.get_state())
-
-
-# ---------- the window ----------
-
-def open_settings_window() -> None:
-    """Start the window in its own process (it needs the main thread for itself)."""
-    subprocess.Popen([sys.executable, "-m", "webcam_fun.settings_window"], cwd=ROOT,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _single_instance():
-    handle = open(ROOT / LOCK_NAME, "w")  # noqa: SIM115 - stays open to hold the lock
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        (ROOT / FOCUS_REQUEST).touch()  # bring the open window forward instead
-        sys.exit(0)
-    return handle
-
-
-def _bring_forward(window) -> None:
-    from AppKit import NSApplication
-    from PyObjCTools import AppHelper
-    window.restore()
-    window.show()
-    AppHelper.callAfter(NSApplication.sharedApplication().activateIgnoringOtherApps_, True)
-
-
-def _watch_focus_requests(window) -> None:
-    request = ROOT / FOCUS_REQUEST
-    while True:
-        time.sleep(FOCUS_POLL_S)
-        if request.exists():
-            request.unlink(missing_ok=True)
-            _bring_forward(window)
-
-
-def main() -> None:
-    import webview
-
-    _lock = _single_instance()
-    (ROOT / FOCUS_REQUEST).unlink(missing_ok=True)
-    window = webview.create_window(
-        "Desk Guard Settings", html=UI_FILE.read_text(), js_api=SettingsApi(),
-        width=WINDOW_SIZE[0], height=WINDOW_SIZE[1], min_size=MIN_SIZE,
-        background_color="#1c1c1e", vibrancy=True)
-    window.events.shown += lambda: _bring_forward(window)
-    webview.start(lambda: _watch_focus_requests(window))
-
-
-if __name__ == "__main__":
-    main()

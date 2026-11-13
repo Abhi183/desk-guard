@@ -212,7 +212,27 @@ function icon(name, size = 16) {
   return svg;
 }
 
-// ---------- talking to Python ----------
+// ---------- talking to Python (WebKit message handler, replies come back by id) ----------
+const DISPLAY_KEYS = new Set(["show_video", "video_on_top"]);
+const waiting = new Map();
+let nextId = 1;
+function api(method, ...args) {
+  return new Promise((resolve) => {
+    const id = nextId++;
+    waiting.set(id, resolve);
+    window.webkit.messageHandlers.deskguard.postMessage(JSON.stringify({ id, method, args }));
+  });
+}
+window.__dgReply = (id, reply) => {
+  const resolve = waiting.get(id);
+  waiting.delete(id);
+  if (resolve) resolve(reply);
+};
+window.__dgPush = (fresh) => { state = fresh; render(); };
+window.__dgShowPage = (id) => {
+  if (state && state.catalog.some((s) => s.id === id)) { page = id; render(); }
+  else page = id;
+};
 let toastTimer = null;
 function toast(text, error = false) {
   const t = document.getElementById("toast");
@@ -225,7 +245,7 @@ async function call(method, ...args) {
   if (busy) return null;
   busy = true;
   try {
-    const reply = await window.pywebview.api[method](...args);
+    const reply = await api(method, ...args);
     if (!reply || !reply.ok) { toast(reply ? reply.error : "No reply from Desk Guard", true); return reply; }
     state = reply.state;
     render();
@@ -239,7 +259,7 @@ async function call(method, ...args) {
 }
 async function change(method, ...args) {
   const reply = await call(method, ...args);
-  if (reply && reply.ok) toast(state.status === "watching" ? "Saved, applying now" : "Saved");
+  if (reply && reply.ok) toast("Saved");
 }
 
 // ---------- building blocks ----------
@@ -271,7 +291,7 @@ function groupButtons(group) {
   return [h("button", { class: "btn", onclick: () => change("set_group", group, true) }, "Enable all"),
           h("button", { class: "btn", onclick: () => change("set_group", group, false) }, "Disable all")];
 }
-function allKeys() { return state.catalog.flatMap((s) => (s.items || []).map((i) => i.key)).filter((k) => k !== "show_video"); }
+function allKeys() { return state.catalog.flatMap((s) => (s.items || []).map((i) => i.key)).filter((k) => !DISPLAY_KEYS.has(k)); }
 function countOn(keys) { return keys.filter((k) => state.flags[k]).length; }
 
 // ---------- pages ----------
@@ -279,7 +299,7 @@ const PAGES = {
   overview() {
     const keys = allKeys(), on = countOn(keys);
     const watching = state.status === "watching";
-    const tiles = state.catalog.flatMap((s) => (s.items || []).filter((i) => i.key !== "show_video")
+    const tiles = state.catalog.flatMap((s) => (s.items || []).filter((i) => !DISPLAY_KEYS.has(i.key))
       .map((i) => ({ ...i, section: s.title, sectionId: s.id })));
     const gesturesOff = !state.flags.gestures;
     return h("div", { class: "page" },
@@ -320,7 +340,13 @@ const PAGES = {
   },
   wellbeing() {
     const sec = section("wellbeing");
-    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))));
+    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))),
+      h("div", { class: "label" }, "Posture"),
+      h("div", { class: "card" + (state.flags.posture ? "" : " dim") }, h("div", { class: "row" },
+        h("div", { class: "text" }, h("div", { class: "title" }, "Recalibrate posture"),
+          h("div", { class: "detail" }, "Sit the way you want to sit, then click. Desk Guard learns it as your good posture.")),
+        h("button", { class: "btn", disabled: !state.flags.posture || state.status !== "watching",
+          onclick: () => call("recalibrate_posture").then((r) => r && r.ok && toast("Sit normally for a moment")) }, "Recalibrate"))));
   },
   gestures() {
     const sec = section("gestures");
@@ -362,16 +388,16 @@ const PAGES = {
   display() {
     const sec = section("display");
     return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))),
-      h("div", { class: "hint", style: "margin:10px 4px" }, "Tip: click the gear in the video window, or press S, to open these settings."));
+      h("div", { class: "hint", style: "margin:10px 4px" }, "Tip: the gear in the video window's title bar, S in the video window, and Cmd-, all open these settings."));
   },
   data() {
     const sec = section("data");
-    const item = (title, detail, label, method) => h("div", { class: "row" },
+    const item = (title, detail, label, method, ...args) => h("div", { class: "row" },
       h("div", { class: "text" }, h("div", { class: "title" }, title), h("div", { class: "detail" }, detail)),
-      h("button", { class: "btn", onclick: () => call(method) }, label));
+      h("button", { class: "btn", onclick: () => call(method, ...args) }, label));
     return h("div", { class: "page" }, head(sec), h("div", { class: "card" },
-      item("Caught photos", "Pictures taken when someone looked over your shoulder.", "Open", "open_caught"),
-      item("Selfies", "Photos taken with the peace sign.", "Open", "open_snaps"),
+      item("Caught photos", "Pictures taken when someone looked over your shoulder.", "Open", "open_folder", "caught"),
+      item("Selfies", "Photos taken with the peace sign.", "Open", "open_folder", "snaps"),
       item("Activity log", "Locks, alerts and gestures, with times.", "Open", "open_log")),
       h("div", { class: "hint", style: "margin:10px 4px" }, "Photos, your face profile and the log never leave this Mac."));
   },
@@ -407,21 +433,7 @@ function render() {
 document.getElementById("enable-all").addEventListener("click", () => change("set_all", true));
 document.getElementById("disable-all").addEventListener("click", () => change("set_all", false));
 
-window.addEventListener("pywebviewready", async () => {
-  try {
-    state = await window.pywebview.api.get_state();
-    render();
-  } catch (e) {
-    document.getElementById("main").replaceChildren(h("div", { class: "loading" }, "Could not load settings: " + e));
-  }
-  setInterval(async () => {  // pick up status changes and edits made from the menu bar
-    if (busy) return;
-    try {
-      const fresh = await window.pywebview.api.get_state();
-      if (JSON.stringify(fresh) !== JSON.stringify(state)) { state = fresh; render(); }
-    } catch (e) { /* window closing */ }
-  }, 1500);
-});
+api("get_state").then((fresh) => { state = fresh; render(); });
 </script>
 </body>
 </html>

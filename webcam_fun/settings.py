@@ -32,6 +32,8 @@ GESTURES = MappingProxyType({
 })
 GESTURE_SWITCHES = tuple(GESTURES)
 ALL_SWITCHES = (*FEATURES, *GESTURES)
+# How the app looks, not what it does: Enable all / Disable all leave these alone.
+DISPLAY_SWITCHES = ("show_video", "video_on_top")
 # Per-gesture actions that desk.py can turn off with --gestures-off (cursor has its own flag).
 GESTURE_ACTIONS = ("volume", "mute", "selfie", "media", "tabs")
 OFF_FLAGS = MappingProxyType({"auto_lock": "--no-lock", "guard": "--no-guard",
@@ -46,7 +48,8 @@ DEFAULT_SENSITIVITY = "normal"
 
 
 def _default_flags() -> Mapping[str, bool]:
-    return MappingProxyType({"show_video": True, **{key: True for key in ALL_SWITCHES}})
+    return MappingProxyType({**{key: True for key in DISPLAY_SWITCHES},
+                             **{key: True for key in ALL_SWITCHES}})
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,7 @@ def with_group(settings: Settings, keys: tuple[str, ...], on: bool) -> Settings:
 
 
 def with_all(settings: Settings, on: bool) -> Settings:
-    """Enable all / Disable all. The video window is a view, not a feature, so it stays."""
+    """Enable all / Disable all. Display switches are a view, not a feature, so they stay."""
     return with_group(settings, ALL_SWITCHES, on)
 
 

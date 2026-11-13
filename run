@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Usage: ./run desk|gestures|ascii|train [options]   (add --help after the name for options)
+# Usage: ./run app | ./run desk|gestures|ascii|train [options]   (add --help after the name for options)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 case "${1:-}" in
+  app)
+    APP="$HOME/Desktop/Desk Guard.app"
+    [ -d "$APP" ] || tools/make_app.sh
+    exec open "$APP" ;;
   desk)     module=desk ;;
   gestures) module=gestures ;;
   ascii)    module=ascii_cam ;;
   train)    module=train_face ;;
-  *) echo "usage: ./run desk|gestures|ascii|train [options]"; exit 1 ;;
+  *) echo "usage: ./run app | ./run desk|gestures|ascii|train [options]"; exit 1 ;;
 esac
 shift
 
 if [ ! -x .venv/bin/python ]; then
   echo "Setting up the Python environment (first run only)..."
-  uv venv -q --python 3.12 .venv
+  uv venv -q --managed-python --python 3.12 .venv  # native arm64, not a Rosetta Python
   uv pip install -q --python .venv/bin/python -r requirements.txt
 fi
 

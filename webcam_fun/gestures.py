@@ -120,19 +120,31 @@ def draw_hand(img: np.ndarray, landmarks) -> None:
 class GestureApp:
     def __init__(self, args: argparse.Namespace) -> None:
         self.send_keys = not getattr(args, "no_keys", False)
-        self.cursor_enabled = not getattr(args, "no_cursor", False)
-        self.disabled = frozenset(parse_off(getattr(args, "gestures_off", "")))
-        hold = getattr(args, "gesture_hold", DEFAULT_HOLD_S)
         self.pointer_released_at = float("-inf")
         self.last_off: str | None = None  # a gesture you're making that is switched off
         self.cursor_mode = CursorMode()
         self.cursor_driver = CursorDriver()
         self.cursor_lifted = False
-        self.trigger = HoldTrigger(hold_s=hold, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4},
-                                   hold_overrides={"Closed_Fist": max(MUTE_HOLD_S, hold * 2)})
+        self.hold: float | None = None
+        self.cursor_enabled = False
+        self.configure(disabled=parse_off(getattr(args, "gestures_off", "")),
+                       cursor=not getattr(args, "no_cursor", False),
+                       hold=getattr(args, "gesture_hold", DEFAULT_HOLD_S))
         self.flash_until = 0.0
         self.message, self.message_until = "", 0.0
         self.ignoring_hand = False  # a hand is in view but it isn't yours
+
+    def configure(self, disabled: set[str], cursor: bool, hold: float) -> None:
+        """Change which gestures work and how long to hold them, while running."""
+        self.disabled = frozenset(disabled)
+        if self.cursor_enabled and not cursor:  # let go of the pointer if just switched off
+            self.cursor_mode = CursorMode()
+        self.cursor_enabled = cursor
+        if hold != self.hold:
+            self.hold = hold
+            self.trigger = HoldTrigger(
+                hold_s=hold, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4},
+                hold_overrides={"Closed_Fist": max(MUTE_HOLD_S, hold * 2)})
 
     def say(self, text: str, now: float) -> None:
         self.message, self.message_until = text, now + 2.5

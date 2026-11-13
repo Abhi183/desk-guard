@@ -25,8 +25,24 @@ def notify(title: str, subtitle: str, message: str) -> None:
                      f'subtitle "{subtitle}"')
 
 
+_popup_handler = None  # set by the app to draw pop-ups itself (webcam_fun.native_toast)
+
+
+def set_popup_handler(handler) -> None:
+    """handler(title, message, color, seconds); safe to call from any thread."""
+    global _popup_handler
+    _popup_handler = handler
+
+
 def popup(title: str, message: str, color: str = "#e5484d", seconds: float = 5.0) -> None:
-    """Our own on-screen pop-up (webcam_fun.toast); shows even when banners are hidden."""
+    """Our own on-screen pop-up; shows even when notification banners are hidden.
+
+    Inside the app it is a native panel; run from Terminal it is a small Tk window
+    (webcam_fun.toast) in its own process.
+    """
+    if _popup_handler is not None:
+        _popup_handler(title, message, color, seconds)
+        return
     subprocess.Popen([sys.executable, "-m", "webcam_fun.toast", title, message, color,
                       str(seconds)], cwd=PROJECT_ROOT, **QUIET)
 
