@@ -1,17 +1,19 @@
-"""Two-finger scrolling. Pure logic; macos.scroll() posts the actual scroll events.
+"""Open-palm scrolling. Pure logic; macos.scroll() posts the actual scroll events.
 
-Hold two fingers up (index and middle, MediaPipe's "Victory") for a moment to grab the
-page, then move the hand up or down like two fingers on a trackpad. Lowering the hand, or
-any other gesture, lets go. Movement is measured at the middle knuckle, which stays
-steadier than the fingertips, and lightly smoothed so tremor doesn't jiggle the page.
+Show an open palm for a moment to grab the page (or open your palm while holding the
+pointer: scrolling takes over at once), then move the hand up or down like two fingers on
+a trackpad. Lowering the hand, or any other gesture, lets go. Movement is measured at the
+middle knuckle, which stays steadier than the fingertips, and lightly smoothed so tremor
+doesn't jiggle the page.
 """
 
 from typing import NamedTuple
 
-TWO_FINGERS = "Victory"
+SCROLL_GESTURE = "Open_Palm"
 MIDDLE_MCP = 9           # landmark used for the hand's height
-ENTER_S = 0.2            # hold two fingers this long before scrolling starts
-EXIT_S = 0.4             # two fingers gone this long: scrolling ends (brief dropouts are fine)
+ENTER_S = 0.35           # hold the palm this long before scrolling starts (a palm is a
+                         # common resting hand, so a little longer than other gestures)
+EXIT_S = 0.4             # palm gone this long: scrolling ends (brief dropouts are fine)
 GAIN_PX = 2400.0         # page pixels per full frame height of hand travel
 SMOOTHING = 0.5          # 0..1, share of each new reading taken (1 = no smoothing)
 DEADZONE = 0.0015        # ignore smaller per-frame moves (fractions of the frame height)
@@ -37,10 +39,10 @@ class ScrollMode:
 
     def update(self, gesture: str | None, hand_y: float | None, now: float) -> ScrollStep:
         """gesture: the recognizer's label; hand_y: 0 (top) .. 1 (bottom), None if no hand."""
-        two = gesture == TWO_FINGERS and hand_y is not None
+        palm = gesture == SCROLL_GESTURE and hand_y is not None
         if not self.active:
-            return self._waiting(two, hand_y, now)
-        if not two:
+            return self._waiting(palm, hand_y, now)
+        if not palm:
             if now - self._last_seen > self.exit_s:
                 self.reset()
                 return ScrollStep(active=False, left=True)
@@ -52,8 +54,8 @@ class ScrollMode:
             return ScrollStep(active=True)
         return ScrollStep(active=True, pixels=moved * self.gain_px)
 
-    def _waiting(self, two: bool, hand_y: float | None, now: float) -> ScrollStep:
-        if not two:
+    def _waiting(self, palm: bool, hand_y: float | None, now: float) -> ScrollStep:
+        if not palm:
             self._since = None
             return ScrollStep(active=False)
         if self._since is None:
@@ -62,6 +64,10 @@ class ScrollMode:
             return ScrollStep(active=False)
         self.active, self._last_seen, self._y = True, now, hand_y
         return ScrollStep(active=True, entered=True)
+
+    def start(self, hand_y: float, now: float) -> None:
+        """Grab the page now (the open palm already took over from the pointer)."""
+        self.active, self._last_seen, self._y, self._since = True, now, hand_y, None
 
     def reset(self) -> None:
         self.active = False

@@ -49,8 +49,8 @@ from scripts.
 | Thumbs up / down (hold) | Volume up / down, with the normal macOS volume pop-up |
 | Fist (hold a bit longer, 0.8 s) | Mute toggle |
 | Index finger pointing left / right (hold) | Previous / next browser tab |
-| Two fingers up, then move the hand up / down | Scroll, like two fingers on a trackpad (follows your natural-scrolling setting) |
-| Open palm (hold 1 s) | Webcam selfie to `snaps/` |
+| Open palm, then move the hand up / down | Scroll, like two fingers on a trackpad (follows your natural-scrolling setting) |
+| Two fingers / peace sign (hold) | Webcam selfie to `snaps/` |
 | Love-you sign 🤟 (hold) | Play / pause whatever is playing (YouTube, Spotify, Music) |
 | Index finger pointing up (hold) | Take the mouse pointer. See below |
 
@@ -67,15 +67,17 @@ works like a trackpad: the pointer starts where it is and follows how your hand 
 all displays. Slow movement is fine control, a quick sweep goes much further. While you hold
 it:
 
-- pinch thumb and index finger together: click
-- open palm, held for 0.4 seconds: click (same as the pinch; there is no right click)
+- pinch thumb and index finger together: click (there is no right click)
 - fist: lift the mouse. The pointer stays put while you move your hand back to a comfortable
   spot; point again to carry on
+- open your palm: switch straight to scrolling; point up again to get the pointer back
+- any other gesture held for half a second (two fingers, thumbs up...): let go of the
+  pointer, and that gesture works as usual
 - lower your hand out of view: let go
 
-The pointer stands still during a pinch or an open palm, so the click lands where you
-pointed. The other gestures are off until you let go. There is no right click, drag or double-click.
-Turn it off with "Hand moves the pointer" in the menu or `--no-cursor`.
+The pointer stands still during a pinch, and freezes the moment another gesture appears,
+so it never drifts while you change hands. There is no drag or double-click.
+Turn it off under Settings > Gestures > Move the pointer, or `--no-cursor`.
 
 ### Auto-lock
 

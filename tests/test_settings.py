@@ -114,8 +114,8 @@ def test_gesture_action_names():
     assert gesture_action("Thumb_Up") == "volume"
     assert gesture_action("Closed_Fist") == "mute"
     assert gesture_action("Point_Left") == "tabs"
-    assert gesture_action("Open_Palm") == "selfie"
-    assert gesture_action("Victory") is None  # two fingers is scrolling, not an action
+    assert gesture_action("Victory") == "selfie"
+    assert gesture_action("Open_Palm") is None  # open palm is scrolling, not an action
 
 
 class _Result:

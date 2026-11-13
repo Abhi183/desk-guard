@@ -24,10 +24,10 @@ FEATURES = MappingProxyType({
 })
 GESTURES = MappingProxyType({
     "gestures": "Gesture control (only you)",  # master switch for everything below
-    "scroll": "Two fingers: scroll",
+    "scroll": "Open palm: scroll",
     "volume": "Thumbs up / down: volume",
     "mute": "Fist: mute",
-    "selfie": "Open palm (hold 1 s): selfie",
+    "selfie": "Two fingers: selfie",
     "media": "Love-you sign: play / pause",
     "tabs": "Point left / right: switch tabs",
     "cursor": "Point up: move the pointer",

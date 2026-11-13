@@ -4,12 +4,12 @@ import pytest
 
 from webcam_fun.cursor import CursorDriver, CursorMode, CursorStep, pinch_ratio
 
-POINT, PALM, FIST = "Pointing_Up", "Open_Palm", "Closed_Fist"
+POINT, PALM, FIST, TWO = "Pointing_Up", "Open_Palm", "Closed_Fist", "Victory"
 OPEN, PINCHED = 0.9, 0.1  # thumb-to-index distance in palm lengths
 
 
 def entered_mode() -> CursorMode:
-    mode = CursorMode(enter_s=0.3, exit_s=0.7, palm_hold_s=0.4)
+    mode = CursorMode(enter_s=0.3, exit_s=0.7, handoff_s=0.25, release_s=0.5)
     mode.update(POINT, OPEN, 0.0)
     assert mode.update(POINT, OPEN, 0.3).active
     return mode
@@ -61,24 +61,38 @@ def test_pinch_has_hysteresis():
     assert not mode.update(None, PINCHED, 0.7).left_click  # still the same pinch
 
 
-def test_open_palm_clicks_once_after_a_hold():
+def test_open_palm_hands_the_hand_over_to_scrolling():
     mode = entered_mode()
-    assert not mode.update(PALM, OPEN, 0.5).left_click
-    assert not mode.update(PALM, OPEN, 0.5).move
-    assert mode.update(PALM, OPEN, 0.9).left_click
-    assert not mode.update(PALM, OPEN, 1.5).left_click
-    mode.update(POINT, OPEN, 1.6)
-    mode.update(PALM, OPEN, 1.7)
-    assert mode.update(PALM, OPEN, 2.1).left_click
+    step = mode.update(PALM, OPEN, 0.5)
+    assert step.active and not step.move and not step.left_click  # freeze, don't click
+    step = mode.update(PALM, OPEN, 0.75)
+    assert not step.active and step.left and step.to_scroll
+    assert not mode.active
 
 
-def test_a_pinch_that_looks_like_an_open_palm_clicks_only_once():
+def test_a_pinch_that_looks_like_an_open_palm_clicks_once_and_stays_pointer():
     mode = entered_mode()
     assert mode.update(PALM, PINCHED, 0.5).left_click
     steps = [mode.update(PALM, PINCHED, 0.5 + t / 10) for t in range(1, 12)]
-    assert not any(s.left_click for s in steps)
+    assert not any(s.left_click or s.to_scroll for s in steps)
+    assert all(s.active for s in steps)
     # Fingers coming apart again must not turn into a second click straight away either.
     assert not mode.update(PALM, 0.4, 1.7).left_click
+
+
+def test_switching_to_two_fingers_lets_go_of_the_pointer():
+    mode = entered_mode()
+    step = mode.update(TWO, OPEN, 0.4)
+    assert step.active and not step.move  # the pointer stops at once
+    step = mode.update(TWO, OPEN, 0.9)
+    assert not step.active and step.left and not step.to_scroll
+
+
+def test_a_one_frame_wrong_label_does_not_drop_the_pointer():
+    mode = entered_mode()
+    mode.update(TWO, OPEN, 0.4)
+    assert mode.update(POINT, OPEN, 0.45).move
+    assert mode.update(TWO, OPEN, 0.8).active  # the 0.5 s count started over
 
 
 def test_there_is_no_right_click():

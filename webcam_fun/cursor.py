@@ -2,9 +2,10 @@
 
 Point your index finger up to take hold of the pointer. It then follows your hand like
 a trackpad follows a finger: where the hand starts doesn't matter, only how it moves.
-Pinch thumb and index finger to click, or hold an open palm to click, make a fist to
-"lift the mouse" (reposition your hand without moving the pointer), lower the hand to let
-go. While you hold the pointer the other gestures are switched off.
+Pinch thumb and index finger to click, make a fist to "lift the mouse" (reposition your
+hand without moving the pointer), lower the hand to let go. Open your palm to hand over
+to scrolling straight away; hold any other gesture for half a second to let go of the
+pointer so that gesture works. While you hold the pointer the other gestures are off.
 """
 
 import math
@@ -15,6 +16,9 @@ Bounds = tuple[float, float, float, float]  # left, top, right, bottom in screen
 
 WRIST, THUMB_TIP, INDEX_MCP, INDEX_TIP, MIDDLE_MCP = 0, 4, 5, 8, 9
 POINTING_UP, OPEN_PALM, FIST = "Pointing_Up", "Open_Palm", "Closed_Fist"
+# Labels that don't take the pointer away: pointing, fist (lift), and frames the
+# recognizer couldn't name (common while the hand moves).
+POINTER_SHAPES = frozenset({POINTING_UP, FIST, None, "", "None"})
 PINCH_ON, PINCH_OFF = 0.3, 0.5  # thumb tip to index tip, in palm lengths
 # Screen points per full frame width / height of hand travel at speed multiplier 1. The
 # camera frame is 4:3, so a hand movement goes the same distance on screen both ways.
@@ -47,22 +51,24 @@ class CursorStep(NamedTuple):
     entered: bool = False      # this frame started cursor mode
     left: bool = False         # this frame ended cursor mode
     lifted: bool = False       # fist: the "mouse" is lifted off the desk
+    to_scroll: bool = False    # left because you opened your palm: start scrolling now
 
 
 class CursorMode:
     """Decides, frame by frame, whether your hand holds the pointer and when it clicks."""
 
-    def __init__(self, enter_s: float = 0.3, exit_s: float = 0.7,
-                 palm_hold_s: float = 0.4) -> None:
+    def __init__(self, enter_s: float = 0.3, exit_s: float = 0.7, handoff_s: float = 0.25,
+                 release_s: float = 0.5) -> None:
         self.enter_s = enter_s
         self.exit_s = exit_s
-        self.palm_hold_s = palm_hold_s
+        self.handoff_s = handoff_s    # open palm this long: scrolling takes over
+        self.release_s = release_s    # another gesture this long: let go of the pointer
         self.active = False
         self._point_since: float | None = None
         self._last_hand = 0.0
         self._pinched = False
-        self._palm_since: float | None = None
-        self._palm_fired = False
+        self._other: str | None = None   # the non-pointer gesture being held
+        self._other_since = 0.0
 
     def update(self, gesture: str | None, pinch: float | None, now: float) -> CursorStep:
         """gesture: the recognizer's label; pinch: pinch_ratio(), None when no hand."""
@@ -74,15 +80,35 @@ class CursorMode:
                 return CursorStep(active=False, left=True)
             return CursorStep(active=True)
         self._last_hand = now
-        pinch_click = self._update_pinch(pinch)
-        # A pinch with the other fingers spread is often labelled an open palm. A palm only
-        # counts while the thumb is well away from the index finger, so one pinch is one click.
-        palm = gesture == OPEN_PALM and not self._pinched and pinch > PINCH_OFF
-        palm_click = self._update_palm(palm, now)
+        click = self._update_pinch(pinch)
+        # A pinch with the other fingers spread is often labelled an open palm; while the
+        # thumb is on the finger it is a pinch, not a palm.
+        if gesture == OPEN_PALM and (self._pinched or pinch <= PINCH_OFF):
+            gesture = None
+        switch = self._switching(gesture, now)
+        if switch is not None:
+            return switch
+        if gesture not in POINTER_SHAPES:  # another gesture is starting: hold still
+            return CursorStep(active=True, left_click=click)
         lifted = gesture == FIST and not self._pinched
-        return CursorStep(active=True,
-                          move=not self._pinched and not lifted and gesture != OPEN_PALM,
-                          left_click=pinch_click or palm_click, lifted=lifted)
+        return CursorStep(active=True, move=not self._pinched and not lifted,
+                          left_click=click, lifted=lifted)
+
+    def _switching(self, gesture: str | None, now: float) -> CursorStep | None:
+        """Let go of the pointer when another gesture has been held long enough."""
+        if gesture in POINTER_SHAPES:
+            self._other = None
+            return None
+        if gesture != self._other:
+            self._other, self._other_since = gesture, now
+        held = now - self._other_since
+        if gesture == OPEN_PALM and held >= self.handoff_s:
+            self._reset()
+            return CursorStep(active=False, left=True, to_scroll=True)
+        if gesture != OPEN_PALM and held >= self.release_s:
+            self._reset()
+            return CursorStep(active=False, left=True)
+        return None
 
     def _waiting(self, gesture: str | None, now: float) -> CursorStep:
         if gesture != POINTING_UP:
@@ -103,22 +129,11 @@ class CursorMode:
             self._pinched = False
         return False
 
-    def _update_palm(self, palm: bool, now: float) -> bool:
-        if not palm:
-            self._palm_since, self._palm_fired = None, False
-            return False
-        if self._palm_since is None:
-            self._palm_since = now
-        if not self._palm_fired and now - self._palm_since >= self.palm_hold_s:
-            self._palm_fired = True
-            return True
-        return False
-
     def _reset(self) -> None:
         self.active = False
         self._point_since = None
         self._pinched = False
-        self._palm_since, self._palm_fired = None, False
+        self._other = None
 
 
 def _alpha(cutoff_hz: float, dt: float) -> float:
