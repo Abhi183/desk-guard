@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desk Guard Settings</title>
+<style>
+  :root {
+    --bg: #f5f5f7; --sidebar: rgba(236, 236, 240, 0.86); --card: #ffffff;
+    --text: #1d1d1f; --muted: #6e6e73; --faint: #a1a1a6; --line: rgba(0, 0, 0, 0.08);
+    --accent: #0a84ff; --accent-soft: rgba(10, 132, 255, 0.12); --green: #28a745;
+    --green-soft: rgba(40, 167, 69, 0.12); --red: #e5484d; --red-soft: rgba(229, 72, 77, 0.12);
+    --amber: #f5a623; --amber-soft: rgba(245, 166, 35, 0.14); --switch-off: #d1d1d6;
+    --hover: rgba(0, 0, 0, 0.04); --shadow: 0 1px 2px rgba(0,0,0,.05), 0 0 0 1px var(--line);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e; --sidebar: rgba(40, 40, 44, 0.86); --card: #2c2c2e; --text: #f5f5f7;
+      --muted: #a1a1a6; --faint: #6e6e73; --line: rgba(255, 255, 255, 0.09);
+      --accent-soft: rgba(10, 132, 255, 0.2); --green: #30d158; --green-soft: rgba(48,209,88,.16);
+      --red-soft: rgba(229,72,77,.2); --amber-soft: rgba(245,166,35,.2); --switch-off: #48484a;
+      --hover: rgba(255, 255, 255, 0.05);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--text); background: var(--bg); display: flex; overflow: hidden;
+    -webkit-user-select: none; user-select: none; -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; }
+
+  /* ---------- sidebar ---------- */
+  aside {
+    width: 232px; flex: none; background: var(--sidebar); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 18px 12px 14px;
+    -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center;
+    background: linear-gradient(145deg, #3a3a3c, #111); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+  }
+  .brand h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500;
+    color: var(--muted); margin-top: 1px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .pill.watching .dot { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+  .pill.blocked .dot { background: var(--amber); }
+  nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 7px;
+    background: none; text-align: left; cursor: default; font-weight: 500;
+  }
+  .nav-item:hover { background: var(--hover); }
+  .nav-item.active { background: var(--accent); color: #fff; }
+  .nav-item svg { width: 16px; height: 16px; flex: none; }
+  .nav-item .count { margin-left: auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .nav-item.active .count { color: rgba(255,255,255,.75); }
+  .sidebar-foot { margin-top: auto; display: grid; gap: 6px; padding: 0 2px; }
+
+  /* ---------- content ---------- */
+  main { flex: 1; overflow-y: auto; padding: 30px 36px 60px; }
+  .page { max-width: 640px; margin: 0 auto; }
+  .page-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 20px; }
+  .page-head h2 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -0.02em; }
+  .page-head p { margin: 4px 0 0; color: var(--muted); }
+  .page-head .actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
+  .label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+           color: var(--muted); margin: 22px 4px 8px; }
+
+  .card { background: var(--card); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 14px; padding: 13px 16px; min-height: 58px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row.dim { opacity: .45; }
+  .row .glyph { width: 52px; white-space: nowrap; height: 34px; border-radius: 8px; background: var(--hover);
+                display: grid; place-items: center; font-size: 15px; flex: none; }
+  .row .text { flex: 1; min-width: 0; }
+  .row .title { font-weight: 500; }
+  .row .detail { color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .row.master .title { font-weight: 600; }
+  .sub { padding: 0 16px 14px 16px; margin-top: -4px; }
+  .sub.dim { opacity: .45; pointer-events: none; }
+
+  /* switch */
+  .switch { position: relative; width: 38px; height: 22px; flex: none; }
+  .switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: default; z-index: 1; }
+  .switch span { position: absolute; inset: 0; background: var(--switch-off); border-radius: 11px;
+                 transition: background .18s; }
+  .switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+                        border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+                        transition: transform .18s cubic-bezier(.3,.7,.4,1); }
+  .switch input:checked + span { background: var(--green); }
+  .switch input:checked + span::after { transform: translateX(16px); }
+  .switch input:focus-visible + span { outline: 3px solid var(--accent-soft); outline-offset: 1px; }
+  .switch input:disabled { pointer-events: none; }
+
+  /* buttons */
+  .btn { border: 0; border-radius: 7px; padding: 6px 13px; font-weight: 500; background: var(--card);
+         box-shadow: var(--shadow); cursor: default; white-space: nowrap; }
+  .btn:hover { filter: brightness(0.97); }
+  .btn:active { filter: brightness(0.92); }
+  .btn.primary { background: var(--accent); color: #fff; box-shadow: none; }
+  .btn.danger { color: var(--red); }
+  .btn.block { width: 100%; padding: 8px; }
+  .btn:disabled { opacity: .5; }
+
+  /* segmented control */
+  .seg { display: inline-flex; background: var(--hover); border-radius: 8px; padding: 2px; gap: 2px; }
+  .seg button { white-space: nowrap; border: 0; background: none; padding: 5px 12px; border-radius: 6px; font-weight: 500;
+                font-variant-numeric: tabular-nums; cursor: default; color: var(--muted); }
+  .seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .seg-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+  .seg-row .detail { color: var(--muted); font-size: 12px; }
+
+  /* overview */
+  .hero { display: flex; align-items: center; gap: 18px; padding: 20px; }
+  .hero .ring { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+                background: var(--hover); flex: none; }
+  .hero.watching .ring { background: var(--green-soft); color: var(--green); }
+  .hero h3 { margin: 0; font-size: 17px; font-weight: 600; }
+  .hero p { margin: 2px 0 0; color: var(--muted); }
+  .hero .btn { margin-left: auto; }
+  .meter { height: 6px; border-radius: 3px; background: var(--hover); overflow: hidden; margin-top: 10px; }
+  .meter i { display: block; height: 100%; background: var(--green); border-radius: 3px; transition: width .25s; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+  .tile { background: var(--card); border-radius: 12px; box-shadow: var(--shadow); padding: 14px;
+          display: flex; flex-direction: column; gap: 10px; min-height: 96px; }
+  .tile .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .tile .title { font-weight: 600; }
+  .tile .section { font-size: 11px; color: var(--muted); }
+  .tile.off { opacity: .7; }
+  .bulk { display: flex; gap: 10px; }
+  .bulk .btn { flex: 1; padding: 9px; }
+
+  /* identity */
+  .field { display: flex; gap: 8px; }
+  .field input { flex: 1; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                 border-radius: 7px; padding: 6px 10px; outline: none; -webkit-user-select: text; user-select: text; }
+  .field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .hint.error { color: var(--red); }
+
+  /* toast */
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 20px); opacity: 0;
+           background: rgba(30,30,32,.94); color: #fff; padding: 8px 14px; border-radius: 9px;
+           font-weight: 500; display: flex; gap: 8px; align-items: center; pointer-events: none;
+           transition: opacity .2s, transform .2s; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.error { background: var(--red); }
+  .loading { margin: auto; color: var(--muted); }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <div class="logo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
+      stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div>
+    <div><h1>Desk Guard</h1><div class="pill" id="pill"><span class="dot"></span><span id="pill-text">…</span></div></div>
+  </div>
+  <nav id="nav"></nav>
+  <div class="sidebar-foot">
+    <button class="btn primary block" id="enable-all">Enable all</button>
+    <button class="btn block" id="disable-all">Disable all</button>
+  </div>
+</aside>
+<main id="main"><div class="loading">Loading…</div></main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const ICONS = {
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  shield: '<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z"/><path d="M9 12l2 2 4-4"/>',
+  heart: '<path d="M20.8 5.6a5 5 0 00-7.1 0L12 7.3l-1.7-1.7a5 5 0 00-7.1 7.1L12 21.5l8.8-8.8a5 5 0 000-7.1z"/>',
+  hand: '<path d="M18 11V6a2 2 0 00-4 0v5M14 10V4a2 2 0 00-4 0v6M10 10.5V6a2 2 0 00-4 0v8"/><path d="M18 8a2 2 0 014 0v6a8 8 0 01-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 012.8-2.8L7 15"/>',
+  person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
+  display: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+};
+const STATUS_TEXT = { watching: "Watching", stopped: "Stopped", starting: "Starting…",
+                      "camera blocked": "Camera not allowed" };
+const SENSITIVITY_NAMES = { fast: "Fast", normal: "Normal", careful: "Careful" };
+
+let state = null;
+let page = "overview";
+let busy = false;
+
+// ---------- tiny DOM helper: text only, never innerHTML for data ----------
+function h(tag, props = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c != null) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+function icon(name, size = 16) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", size); svg.setAttribute("height", size);
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8"); svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.innerHTML = ICONS[name] || "";  // constant markup above, no user data
+  return svg;
+}
+
+// ---------- talking to Python ----------
+let toastTimer = null;
+function toast(text, error = false) {
+  const t = document.getElementById("toast");
+  t.textContent = text;
+  t.className = "toast show" + (error ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast" + (error ? " error" : ""); }, error ? 4000 : 1800);
+}
+async function call(method, ...args) {
+  if (busy) return null;
+  busy = true;
+  try {
+    const reply = await window.pywebview.api[method](...args);
+    if (!reply || !reply.ok) { toast(reply ? reply.error : "No reply from Desk Guard", true); return reply; }
+    state = reply.state;
+    render();
+    return reply;
+  } catch (e) {
+    toast(String(e && e.message || e), true);
+    return null;
+  } finally {
+    busy = false;
+  }
+}
+async function change(method, ...args) {
+  const reply = await call(method, ...args);
+  if (reply && reply.ok) toast(state.status === "watching" ? "Saved, applying now" : "Saved");
+}
+
+// ---------- building blocks ----------
+function sw(checked, onchange, disabled = false, label = "") {
+  return h("label", { class: "switch", title: label },
+    h("input", { type: "checkbox", role: "switch", "aria-label": label, checked, disabled,
+                 onchange: (e) => onchange(e.target.checked) }),
+    h("span"));
+}
+function seg(options, current, onpick) {
+  return h("div", { class: "seg", role: "radiogroup" },
+    options.map(([value, text]) => h("button", { class: value === current ? "on" : "",
+      role: "radio", "aria-checked": String(value === current), onclick: () => value !== current && onpick(value) }, text)));
+}
+function settingRow(item, dim = false) {
+  const on = state.flags[item.key];
+  return h("div", { class: "row" + (dim ? " dim" : "") + (item.master ? " master" : "") },
+    item.glyph ? h("div", { class: "glyph" }, item.glyph) : null,
+    h("div", { class: "text" }, h("div", { class: "title" }, item.label), h("div", { class: "detail" }, item.detail)),
+    sw(on, (v) => change("set_flag", item.key, v), dim, item.label));
+}
+function section(id) { return state.catalog.find((s) => s.id === id); }
+function head(sec, actions) {
+  return h("div", { class: "page-head" },
+    h("div", {}, h("h2", {}, sec.title), sec.subtitle ? h("p", {}, sec.subtitle) : null),
+    actions ? h("div", { class: "actions" }, actions) : null);
+}
+function groupButtons(group) {
+  return [h("button", { class: "btn", onclick: () => change("set_group", group, true) }, "Enable all"),
+          h("button", { class: "btn", onclick: () => change("set_group", group, false) }, "Disable all")];
+}
+function allKeys() { return state.catalog.flatMap((s) => (s.items || []).map((i) => i.key)).filter((k) => k !== "show_video"); }
+function countOn(keys) { return keys.filter((k) => state.flags[k]).length; }
+
+// ---------- pages ----------
+const PAGES = {
+  overview() {
+    const keys = allKeys(), on = countOn(keys);
+    const watching = state.status === "watching";
+    const tiles = state.catalog.flatMap((s) => (s.items || []).filter((i) => i.key !== "show_video")
+      .map((i) => ({ ...i, section: s.title, sectionId: s.id })));
+    const gesturesOff = !state.flags.gestures;
+    return h("div", { class: "page" },
+      head({ title: "Overview", subtitle: "Everything Desk Guard does, at a glance." }),
+      h("div", { class: "card hero" + (watching ? " watching" : "") },
+        h("div", { class: "ring" }, icon("eye", 26)),
+        h("div", {}, h("h3", {}, STATUS_TEXT[state.status] || "Stopped"),
+          h("p", {}, watching ? "The camera is on and protecting this Mac." :
+            state.status === "camera blocked" ? "Allow Desk Guard under Privacy & Security > Camera." :
+            "Desk Guard isn't watching right now.")),
+        h("button", { class: "btn" + (watching ? " danger" : " primary"),
+          onclick: () => call("toggle_watching").then((r) => r && r.ok && toast(watching ? "Stopping…" : "Starting…")) },
+          watching ? "Stop watching" : "Start watching")),
+      h("div", { class: "label" }, `${on} of ${keys.length} features on`),
+      h("div", { class: "card", style: "padding:14px 16px" },
+        h("div", { class: "bulk" },
+          h("button", { class: "btn primary", disabled: on === keys.length, onclick: () => change("set_all", true) }, "Enable all features"),
+          h("button", { class: "btn", disabled: on === 0, onclick: () => change("set_all", false) }, "Disable all features")),
+        h("div", { class: "meter" }, h("i", { style: `width:${(on / keys.length) * 100}%` }))),
+      h("div", { class: "label" }, "Quick switches"),
+      h("div", { class: "grid" }, tiles.map((t) => {
+        const dim = t.sectionId === "gestures" && !t.master && gesturesOff;
+        return h("div", { class: "tile" + (state.flags[t.key] && !dim ? "" : " off") },
+          h("div", { class: "top" },
+            h("div", {}, h("div", { class: "title" }, (t.glyph ? t.glyph + "  " : "") + t.label),
+              h("div", { class: "section" }, t.section)),
+            sw(state.flags[t.key], (v) => change("set_flag", t.key, v), dim, t.label)));
+      })));
+  },
+  security() {
+    const sec = section("security");
+    const lockOn = state.flags.auto_lock;
+    const rows = sec.items.map((i) => settingRow(i));
+    rows.splice(1, 0, h("div", { class: "sub" + (lockOn ? "" : " dim") },
+      h("div", { class: "seg-row" }, h("span", { class: "detail" }, "Lock after you've been gone for"),
+        seg(state.lock_choices.map((s) => [s, `${s}s`]), state.lock_after, (s) => change("set_lock_after", s)))));
+    return h("div", { class: "page" }, head(sec, groupButtons("features")), h("div", { class: "card" }, rows));
+  },
+  wellbeing() {
+    const sec = section("wellbeing");
+    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))));
+  },
+  gestures() {
+    const sec = section("gestures");
+    const [master, ...rest] = sec.items;
+    const off = !state.flags.gestures;
+    return h("div", { class: "page" }, head(sec, groupButtons("gestures")),
+      h("div", { class: "card" }, settingRow(master)),
+      h("div", { class: "label" }, `Gestures · ${countOn(rest.map((i) => i.key))} of ${rest.length} on`),
+      h("div", { class: "card" }, rest.map((i) => settingRow(i, off))),
+      h("div", { class: "label" }, "Hold time"),
+      h("div", { class: "card" + (off ? " dim" : ""), style: "padding:14px 16px" + (off ? ";opacity:.45;pointer-events:none" : "") },
+        h("div", { class: "seg-row" },
+          h("span", { class: "detail" }, "How long to hold a gesture before it fires"),
+          seg(Object.entries(state.sensitivity_levels).map(([k, s]) => [k, `${SENSITIVITY_NAMES[k] || k} · ${s}s`]),
+              state.sensitivity, (k) => change("set_sensitivity", k))),
+        h("div", { class: "hint" }, "Careful avoids accidental triggers. Mute always needs at least 0.8 s.")));
+  },
+  identity() {
+    const sec = section("identity");
+    const input = h("input", { type: "text", maxlength: "20", value: state.name === "you" ? "" : state.name,
+      placeholder: "you", spellcheck: "false" });
+    const hint = h("div", { class: "hint" }, "Shown on the box around your face. Plain letters, 20 at most.");
+    const save = async () => {
+      const r = await call("set_name", input.value);
+      if (r && r.ok) toast("Name saved");
+      else if (r) { hint.textContent = r.error; hint.className = "hint error"; }
+    };
+    input.addEventListener("keydown", (e) => e.key === "Enter" && save());
+    return h("div", { class: "page" }, head(sec),
+      h("div", { class: "label" }, "Your name"),
+      h("div", { class: "card", style: "padding:14px 16px" },
+        h("div", { class: "field" }, input, h("button", { class: "btn primary", onclick: save }, "Save")), hint),
+      h("div", { class: "label" }, "Face profile"),
+      h("div", { class: "card" }, h("div", { class: "row" },
+        h("div", { class: "text" }, h("div", { class: "title" }, "Relearn my face"),
+          h("div", { class: "detail" }, "Forget the saved face. Then sit alone in front of the camera for a few seconds.")),
+        h("button", { class: "btn", onclick: () => call("relearn_face").then((r) => r && r.ok && toast("Look at the camera on your own")) }, "Relearn"))));
+  },
+  display() {
+    const sec = section("display");
+    return h("div", { class: "page" }, head(sec), h("div", { class: "card" }, sec.items.map((i) => settingRow(i))),
+      h("div", { class: "hint", style: "margin:10px 4px" }, "Tip: click the gear in the video window, or press S, to open these settings."));
+  },
+  data() {
+    const sec = section("data");
+    const item = (title, detail, label, method) => h("div", { class: "row" },
+      h("div", { class: "text" }, h("div", { class: "title" }, title), h("div", { class: "detail" }, detail)),
+      h("button", { class: "btn", onclick: () => call(method) }, label));
+    return h("div", { class: "page" }, head(sec), h("div", { class: "card" },
+      item("Caught photos", "Pictures taken when someone looked over your shoulder.", "Open", "open_caught"),
+      item("Selfies", "Photos taken with the peace sign.", "Open", "open_snaps"),
+      item("Activity log", "Locks, alerts and gestures, with times.", "Open", "open_log")),
+      h("div", { class: "hint", style: "margin:10px 4px" }, "Photos, your face profile and the log never leave this Mac."));
+  },
+};
+
+// ---------- render ----------
+function renderNav() {
+  const nav = document.getElementById("nav");
+  nav.replaceChildren(...state.catalog.map((s) => {
+    const keys = (s.items || []).map((i) => i.key);
+    return h("button", { class: "nav-item" + (s.id === page ? " active" : ""), onclick: () => { page = s.id; render(); document.getElementById("main").scrollTop = 0; } },
+      icon(s.icon), s.title, keys.length ? h("span", { class: "count" }, `${countOn(keys)}/${keys.length}`) : null);
+  }));
+  const pill = document.getElementById("pill");
+  pill.className = "pill" + (state.status === "watching" ? " watching" : state.status === "camera blocked" ? " blocked" : "");
+  document.getElementById("pill-text").textContent = STATUS_TEXT[state.status] || "Stopped";
+  const keys = allKeys(), on = countOn(keys);
+  document.getElementById("enable-all").disabled = on === keys.length;
+  document.getElementById("disable-all").disabled = on === 0;
+}
+function render() {
+  if (!state) return;
+  const main = document.getElementById("main");
+  const el = document.activeElement;
+  const typing = el && el.tagName === "INPUT" && el.type === "text";
+  renderNav();
+  if (typing) return;  // don't wipe a name being typed
+  const scroll = main.scrollTop;
+  main.replaceChildren(PAGES[page]());
+  main.scrollTop = scroll;
+}
+
+document.getElementById("enable-all").addEventListener("click", () => change("set_all", true));
+document.getElementById("disable-all").addEventListener("click", () => change("set_all", false));
+
+window.addEventListener("pywebviewready", async () => {
+  try {
+    state = await window.pywebview.api.get_state();
+    render();
+  } catch (e) {
+    document.getElementById("main").replaceChildren(h("div", { class: "loading" }, "Could not load settings: " + e));
+  }
+  setInterval(async () => {  // pick up status changes and edits made from the menu bar
+    if (busy) return;
+    try {
+      const fresh = await window.pywebview.api.get_state();
+      if (JSON.stringify(fresh) !== JSON.stringify(state)) { state = fresh; render(); }
+    } catch (e) { /* window closing */ }
+  }, 1500);
+});
+</script>
+</body>
+</html>

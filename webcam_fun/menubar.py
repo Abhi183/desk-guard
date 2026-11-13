@@ -16,6 +16,12 @@ from webcam_fun import settings as cfg
 from webcam_fun.dock import QUIT_ALL_REQUEST, hide_from_dock
 from webcam_fun.gestures import __doc__ as GESTURE_HELP
 from webcam_fun.recognition import forget_profile
+from webcam_fun.settings_window import (
+    RELEARN_REQUEST,
+    STATUS_NAME,
+    TOGGLE_REQUEST,
+    open_settings_window,
+)
 from webcam_fun.vision import ROOT
 
 SETTINGS_FILE = ROOT / "menubar_settings.json"
@@ -39,7 +45,7 @@ ENABLE_ALL, DISABLE_ALL = "Enable all features", "Disable all features"
 GROUP_ON, GROUP_OFF = "Enable all gestures", "Disable all gestures"
 FEATURES_MENU, GESTURES_MENU, LOCK_MENU = "Features", "Gestures", "Lock after"
 SENSITIVITY_TITLE = "Hold time: {level} ({seconds:g}s)"
-GUIDE, RELEARN = "Gesture guide...", "Relearn my face"
+GUIDE, RELEARN, SETTINGS = "Gesture guide...", "Relearn my face", "Settings..."
 CAUGHT, LOG, QUIT = "Open caught photos", "Open log", "Quit Desk Guard"
 # Several quick clicks in the menu restart the watcher once, after the last click.
 RESTART_DEBOUNCE_S = 0.8
@@ -74,6 +80,7 @@ class DeskGuardMenu(rumps.App):
         self.placed = False
         self.settings = cfg.load(SETTINGS_FILE)
         self.restart_at: float | None = None  # pending restart to apply new settings
+        self.settings_mtime = self._settings_mtime()
         self.child: subprocess.Popen | None = None
         self.blocked = False  # camera permission missing; keep retrying
         self.retry_ticks = 0
@@ -82,7 +89,9 @@ class DeskGuardMenu(rumps.App):
         self.switches: dict[str, rumps.MenuItem] = {}
         self.lock_items: dict[int, rumps.MenuItem] = {}
         self.sensitivity_items: dict[str, rumps.MenuItem] = {}
-        self.menu = [self.status, self.toggle, None,
+        self.menu = [self.status, self.toggle,
+                     rumps.MenuItem(SETTINGS, callback=lambda _: open_settings_window(),
+                                    key=","), None,
                      self._switch_item("show_video", VIDEO),
                      rumps.MenuItem(ENABLE_ALL, callback=lambda _: self.set_all(True)),
                      rumps.MenuItem(DISABLE_ALL, callback=lambda _: self.set_all(False)),
@@ -185,11 +194,41 @@ class DeskGuardMenu(rumps.App):
         except OSError as e:
             print(f"could not save settings: {e}", file=sys.stderr)
             macos.popup("Desk Guard", f"Settings not saved: {e}", "#f5a623")
+        self.settings_mtime = self._settings_mtime()
+        self._applied()
+
+    def _applied(self) -> None:
         self._sync_checkmarks()
         if self.running():  # options are command-line flags, so restart to apply
             self.restart_at = time.monotonic() + RESTART_DEBOUNCE_S
 
+    @staticmethod
+    def _settings_mtime() -> float | None:
+        try:
+            return SETTINGS_FILE.stat().st_mtime
+        except OSError:
+            return None
+
+    @staticmethod
+    def _take_request(name: str) -> bool:
+        path = ROOT / name
+        if not path.exists():
+            return False
+        path.unlink(missing_ok=True)
+        return True
+
     def on_apply_tick(self, _) -> None:
+        mtime = self._settings_mtime()
+        if mtime != self.settings_mtime:  # changed in the settings window
+            self.settings_mtime = mtime
+            new = cfg.load(SETTINGS_FILE)
+            if new != self.settings:
+                self.settings = new
+                self._applied()
+        if self._take_request(TOGGLE_REQUEST):
+            self.on_toggle(None)
+        if self._take_request(RELEARN_REQUEST):
+            self.on_relearn(None)
         if self.restart_at is None or time.monotonic() < self.restart_at:
             return
         self.restart_at = None
@@ -275,11 +314,7 @@ class DeskGuardMenu(rumps.App):
         if not SHOW_REQUEST.exists():
             return
         SHOW_REQUEST.unlink(missing_ok=True)
-        self.start()
-        macos.popup("Desk Guard is running",
-                    "Options are under the eye icon in the menu bar. Not there? Allow Python in "
-                    "System Settings > Menu Bar.",
-                    "#30a46c")
+        open_settings_window()  # clicking the app while it runs opens its settings
 
     def _sync_checkmarks(self) -> None:
         flags = self.settings.flags
@@ -299,6 +334,11 @@ class DeskGuardMenu(rumps.App):
         self.title = ICON_ON if on else ICON_OFF
         self.toggle.title = STOP if on else START
         self.status.title = "Watching" if on else "Stopped"
+        status = "watching" if on else "camera blocked" if self.blocked else "stopped"
+        try:
+            (ROOT / STATUS_NAME).write_text(status + "\n")
+        except OSError as e:
+            print(f"could not write status: {e}", file=sys.stderr)
 
 
 def main() -> None:

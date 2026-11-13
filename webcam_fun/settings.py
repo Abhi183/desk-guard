@@ -77,6 +77,9 @@ class Settings:
             raise ValueError(f"lock delay must be one of {LOCK_CHOICES}")
         return replace(self, lock_after=seconds)
 
+    def with_name(self, name: str) -> "Settings":
+        return replace(self, name=clean_name(name))
+
     def with_sensitivity(self, level: str) -> "Settings":
         if level not in SENSITIVITY:
             raise ValueError(f"sensitivity must be one of {tuple(SENSITIVITY)}")

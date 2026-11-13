@@ -5,3 +5,4 @@ pytest
 rumps==0.4.0
 pyobjc-framework-Cocoa==13.0
 pyobjc-framework-Quartz==13.0
+pywebview==6.2.1

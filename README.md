@@ -115,6 +115,25 @@ quit the same way Cmd+Q does. It runs once per visit: if you reopen Messages whi
 still there, it stays open until they leave and someone sits down again. The apps and sites
 are listed at the top of `webcam_fun/personal.py`.
 
+## Settings window
+
+Click the gear in the top-right corner of the video window (or press `s`), click Desk
+Guard.app while it's running, or pick Settings... (cmd-,) in the menu bar. The window has:
+
+- Overview: watching status with start/stop, Enable all / Disable all features, and a quick
+  switch for every feature
+- Security: auto-lock with lock delay (2/5/10/30 s), shoulder-surfer alarm, close personal
+  apps with company
+- Wellbeing: posture alerts, sounds
+- Gestures: master switch, one switch per gesture, Enable all / Disable all, hold time
+- Face & identity: your name, relearn my face
+- Display: video window on/off
+- Data & logs: caught photos, selfies, activity log
+
+Changes save to `menubar_settings.json` right away and the watcher restarts with them about a
+second later. The window is `webcam_fun/settings_window.py` (pywebview) with its UI in
+`settings_ui.html`.
+
 ## Menu bar
 
 The eye icon has:
@@ -170,6 +189,7 @@ Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate postur
 
 - `webcam_fun/desk.py` main loop: faces, lock, posture, gestures, video window
 - `webcam_fun/menubar.py` menu bar app that starts and stops `desk.py`
+- `webcam_fun/settings_window.py`, `settings_ui.html` the settings window
 - `webcam_fun/settings.py` saved options and the `desk.py` flags they turn into (unit tested)
 - `webcam_fun/gestures.py`, `pointing.py`, `gesture_trigger.py` gesture recognition and actions
 - `webcam_fun/cursor.py` pointer control logic (unit tested)

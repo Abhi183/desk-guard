@@ -2,11 +2,13 @@
 hand-gesture control that only obeys you, and closing personal apps when someone
 sits down with you, all from one camera feed.
 
-Keys: q quit  m mute  t always-on-top  c recalibrate posture  l lock on/off  g gestures on/off
-      f relearn my face
+Keys: q quit  s settings  m mute  t always-on-top  c recalibrate posture  l lock on/off
+      g gestures on/off  f relearn my face
+Click the gear in the top-right corner of the video window for settings.
 """
 
 import argparse
+import math
 import threading
 import time
 
@@ -33,6 +35,7 @@ from webcam_fun.identity import (
 from webcam_fun.posture import PostureJudge
 from webcam_fun.presence import AutoLock
 from webcam_fun.recognition import FaceId
+from webcam_fun.settings_window import open_settings_window
 from webcam_fun.vision import (
     ROOT,
     Box,
@@ -55,6 +58,9 @@ DEFAULT_COMPANY_AFTER_S = 8  # someone sitting with you this long closes persona
 MIN_COMPANY_AFTER_S = 1
 RECONNECT_DELAY_S = 2
 WINDOW_SIZE = (480, 360)
+BANNER_H = 44
+GEAR_R, GEAR_MARGIN, GEAR_TEETH = 11, 24, 8
+SETTINGS_REOPEN_S = 1.0  # one click opens the window once, even if the mouse bounces
 POSTURE_TEXT = {"good": "posture ok", "too_close": "too close to the screen",
                 "slouching": "slouching", "calibrating": "posture: sit normally, calibrating",
                 "no_face": "posture: -"}
@@ -123,6 +129,10 @@ class DeskApp:
         self.owner = OwnerTracker()
         self.body: BodyDetector | None = None  # loaded the first time your face is hidden
         self.body_share: float | None = None   # last body check, for the status line
+        self.mouse: tuple[int, int] = (-1, -1)  # last pointer position over the video
+        self.settings_opened_at = float("-inf")
+        self._banner_color = GRAY
+        self.frame_width = WINDOW_SIZE[0]
 
     # ---------- events ----------
     @staticmethod
@@ -313,11 +323,50 @@ class DeskApp:
         elif key == ord("g"):
             self.gestures_enabled = not self.gestures_enabled
             self.say(f"gestures {'on' if self.gestures_enabled else 'off'}", now)
+        elif key == ord("s"):
+            self.open_settings(now)
         elif key == ord("f"):
             self.face_id.relearn()
             self.log("relearning your face")
             self.say("relearning your face, look at the camera alone", now)
         return True
+
+    # ---------- settings gear ----------
+    def gear_center(self, frame_width: int) -> tuple[int, int]:
+        return frame_width - GEAR_MARGIN, BANNER_H // 2
+
+    def on_mouse(self, event: int, x: int, y: int, frame_width: int) -> None:
+        self.mouse = (x, y)
+        if event != cv2.EVENT_LBUTTONUP:
+            return
+        gx, gy = self.gear_center(frame_width)
+        if math.hypot(x - gx, y - gy) <= GEAR_R + 8:
+            self.open_settings(time.monotonic())
+
+    def open_settings(self, now: float) -> None:
+        if now - self.settings_opened_at < SETTINGS_REOPEN_S:
+            return
+        self.settings_opened_at = now
+        try:
+            open_settings_window()
+        except OSError as e:
+            self.log(f"could not open settings: {e}")
+            self.say("could not open settings, see the log", now)
+
+    def _draw_gear(self, img: np.ndarray) -> None:
+        cx, cy = self.gear_center(img.shape[1])
+        hover = math.hypot(self.mouse[0] - cx, self.mouse[1] - cy) <= GEAR_R + 8
+        if hover:
+            cv2.circle(img, (cx, cy), GEAR_R + 8, (255, 255, 255), -1, cv2.LINE_AA)
+        color = (60, 60, 60) if hover else WHITE
+        for i in range(GEAR_TEETH):
+            a = 2 * math.pi * i / GEAR_TEETH
+            inner = (int(cx + math.cos(a) * GEAR_R * 0.6), int(cy + math.sin(a) * GEAR_R * 0.6))
+            outer = (int(cx + math.cos(a) * GEAR_R * 1.15), int(cy + math.sin(a) * GEAR_R * 1.15))
+            cv2.line(img, inner, outer, color, 4, cv2.LINE_AA)
+        cv2.circle(img, (cx, cy), int(GEAR_R * 0.8), color, -1, cv2.LINE_AA)
+        hole = (255, 255, 255) if hover else self._banner_color
+        cv2.circle(img, (cx, cy), int(GEAR_R * 0.35), hole, -1, cv2.LINE_AA)
 
     # ---------- drawing ----------
     def render(self, frame: np.ndarray, faces: list[Box], now: float) -> np.ndarray:
@@ -357,8 +406,10 @@ class DeskApp:
             text, color = "No one at the desk", GRAY
         else:
             text, color = "All clear", GREEN
-        cv2.rectangle(img, (0, 0), (img.shape[1], 44), color, -1)
+        cv2.rectangle(img, (0, 0), (img.shape[1], BANNER_H), color, -1)
         put_text(img, text, (14, 31), WHITE, scale=0.9)
+        self._banner_color = color
+        self._draw_gear(img)
 
     def _draw_status(self, img: np.ndarray, now: float) -> None:
         h = img.shape[0]
@@ -375,7 +426,7 @@ class DeskApp:
             lines.append(gesture_message)
         lock = "off" if not self.lock_enabled else f"{self.args.lock_after:g}s"
         lines.append(f"caught {self.caught} | lock {lock} | sound {'off' if self.muted else 'on'}"
-                     " | q m t c l g f")
+                     " | s settings")
         for i, line in enumerate(reversed(lines)):
             put_text(img, line, (10, h - 12 - i * 22), WHITE, scale=0.5, thickness=1)
 
@@ -431,6 +482,8 @@ def main() -> None:
         cv2.waitKey(1)
         show_window_up_front()
         on_dock_quit(lambda: app.request_quit_all("Quit from the Dock"))
+        cv2.setMouseCallback(WINDOW, lambda event, x, y, _flags, _param:
+                             app.on_mouse(event, x, y, app.frame_width))
     if not args.no_privacy and not args.dry_run:
         personal.ask_tab_permission()
     macos.alert("Desk Guard", "Watching", "Sit normally for a moment so I can learn your posture",
@@ -444,6 +497,7 @@ def main() -> None:
                 continue
             frame = cv2.flip(frame, 1)
             now = time.monotonic()
+            app.frame_width = frame.shape[1]
             faces = app.step(frame, now)
             if app.quit_requested:
                 break

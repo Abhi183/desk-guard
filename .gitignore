@@ -26,3 +26,8 @@ Desk Guard.app/
 # Downloaded on first run by ./run (too big for git)
 models/face_recognition_sface_2021dec.onnx
 models/selfie_segmenter.tflite
+.status
+.toggle_request
+.relearn_request
+.settings_focus
+.settings_window.lock
