@@ -4,64 +4,7 @@ import time
 
 import numpy as np
 
-from webcam_fun.engine import LatestFrameCamera
 from webcam_fun.gestures import GestureApp
-
-
-class FakeCapture:
-    """Delivers numbered frames, then fails (like a camera cut off by the lock screen)."""
-
-    def __init__(self, frames: int, delay_s: float = 0.0):
-        self.left = frames
-        self.delay_s = delay_s
-        self.count = 0
-        self.released = False
-        self.gate = threading.Event()
-        self.gate.set()
-
-    def read(self):
-        self.gate.wait()
-        time.sleep(self.delay_s)
-        if self.left == 0:
-            return False, None
-        self.left -= 1
-        self.count += 1
-        return True, np.full((2, 2, 3), self.count, np.uint8)
-
-    def release(self):
-        self.released = True
-
-
-def test_reader_skips_to_the_newest_frame():
-    cap = FakeCapture(frames=5)
-    camera = LatestFrameCamera(cap)
-    time.sleep(0.1)  # all five frames arrive before anyone reads
-    frame, seq = camera.read(0, timeout=1)
-    assert seq == 5 and frame[0, 0, 0] == 5  # frames 1-4 were dropped, not queued
-    camera.close()
-    assert cap.released
-
-
-def test_read_times_out_without_a_new_frame():
-    cap = FakeCapture(frames=1)
-    cap.gate.clear()  # camera stalls
-    camera = LatestFrameCamera(cap)
-    start = time.monotonic()
-    frame, seq = camera.read(0, timeout=0.2)
-    assert frame is None and seq == 0
-    assert time.monotonic() - start >= 0.19
-    cap.gate.set()
-    camera.close()
-
-
-def test_failed_camera_wakes_the_reader_at_once():
-    cap = FakeCapture(frames=0)
-    camera = LatestFrameCamera(cap)
-    start = time.monotonic()
-    frame, _ = camera.read(0, timeout=5)
-    assert frame is None
-    assert time.monotonic() - start < 1  # didn't sit out the whole timeout
-    camera.close()
 
 
 def _gesture_app():
@@ -97,18 +40,46 @@ from webcam_fun import engine  # noqa: E402
 from webcam_fun import settings as cfg  # noqa: E402
 
 
-FACETIME = engine.Camera("builtin-1", "FaceTime HD Camera", True, 0)
+FACETIME = engine.Camera("builtin-1", "FaceTime HD Camera", True)
+USB = engine.Camera("usb-2", "Desk Camera", False)
 
 
-def _watcher(monkeypatch, statuses, camera=None, cameras=(FACETIME,)):
-    monkeypatch.setattr(engine, "try_open_camera", lambda _index: camera)
+class FakeSession:
+    """Stands in for AVCamera: records what was opened, gives frames on request."""
+
+    def __init__(self, works=True):
+        self.works = works
+        self.uid = None
+        self.calls = []
+        self.closed = False
+
+    def open(self, uid):
+        self.calls.append(("open", uid))
+        self.uid = uid if self.works else None
+        return self.works
+
+    def switch_to(self, uid):
+        self.calls.append(("switch", uid))
+        if self.works:
+            self.uid = uid
+        return self.works
+
+    def read(self, last_seq, timeout):
+        return np.zeros((4, 4, 3), np.uint8), last_seq + 1
+
+    def close(self):
+        self.closed = True
+
+
+def _watcher(monkeypatch, statuses, works=True, cameras=(FACETIME,)):
+    monkeypatch.setattr(engine, "AVCamera", lambda: FakeSession(works))
     monkeypatch.setattr(engine, "list_cameras", lambda: list(cameras))
     return engine.Watcher(cfg.Settings(), on_status=statuses.append)
 
 
 def test_camera_that_gives_no_picture_reports_blocked_and_ends(monkeypatch):
     statuses = []
-    w = _watcher(monkeypatch, statuses)
+    w = _watcher(monkeypatch, statuses, works=False)
     assert w.start()
     w._thread.join(2)
     assert statuses == ["starting", "camera blocked"]
@@ -125,15 +96,24 @@ def test_no_camera_connected_waits_instead_of_failing(monkeypatch):
     assert statuses[-1] == "stopped" and not w.running
 
 
-def test_feed_opens_the_camera_by_its_current_number(monkeypatch):
-    opened = []
-    monkeypatch.setattr(engine, "try_open_camera",
-                        lambda index: opened.append(index) or FakeCapture(frames=3))
-    feed = engine._Feed()
-    usb = engine.Camera("usb-2", "Desk Camera", False, 1)
-    assert feed.open(usb) and feed.camera == usb and opened == [1]
+def test_feed_opens_the_camera_by_its_id_and_switches_in_place():
+    sessions = []
+    feed = engine._Feed(opener=lambda: sessions.append(FakeSession()) or sessions[-1])
+    assert feed.open(USB) and feed.camera == USB
+    assert feed.switch(FACETIME) and feed.camera == FACETIME
+    assert len(sessions) == 1  # switching reused the running session
+    assert sessions[0].calls == [("open", "usb-2"), ("switch", "builtin-1")]
     feed.close()
-    assert feed.reader is None
+    assert sessions[0].closed and feed.reader is None
+
+
+def test_failed_switch_keeps_the_old_camera():
+    session = FakeSession()
+    feed = engine._Feed(opener=lambda: session)
+    feed.open(USB)
+    session.works = False
+    assert not feed.switch(FACETIME)
+    assert feed.camera == USB
 
 
 def test_a_finished_old_run_cannot_change_the_status(monkeypatch):
@@ -156,13 +136,3 @@ def test_start_refuses_while_the_last_run_is_still_stopping(monkeypatch):
     gate.set()
     w._thread.join()
     assert w.start() is True
-
-
-def test_camera_is_released_by_the_reading_thread():
-    cap = FakeCapture(frames=10_000, delay_s=0.01)
-    released_on = []
-    cap.release = lambda: released_on.append(threading.current_thread().name)
-    camera = LatestFrameCamera(cap)
-    time.sleep(0.05)
-    camera.close()
-    assert released_on == ["camera"]

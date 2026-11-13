@@ -5,13 +5,24 @@ import pytest
 from webcam_fun import settings as s
 from webcam_fun.cameras import Camera, choose
 
-BUILT_IN = Camera("builtin-1", "FaceTime HD Camera", True, 0)
-EXTERNAL = Camera("usb-2", "Desk Camera", False, 1)
-OTHER = Camera("usb-3", "Second Camera", False, 2)
+BUILT_IN = Camera("builtin-1", "FaceTime HD Camera", True)
+EXTERNAL = Camera("usb-2", "Desk Camera", False)
+OTHER = Camera("usb-3", "Second Camera", False)
+IPHONE = Camera("phone-4", "Abhi iPhone Camera", False, continuity=True)
 
 
 def test_auto_prefers_an_external_camera():
     assert choose([BUILT_IN, EXTERNAL], s.AUTO_CAMERA) == EXTERNAL
+
+
+def test_auto_never_prefers_the_iphone():
+    assert choose([IPHONE, BUILT_IN], s.AUTO_CAMERA) == BUILT_IN
+    assert choose([IPHONE, BUILT_IN, EXTERNAL], s.AUTO_CAMERA) == EXTERNAL
+    assert choose([IPHONE], s.AUTO_CAMERA) == IPHONE  # the only camera left
+
+
+def test_iphone_can_still_be_picked():
+    assert choose([BUILT_IN, IPHONE], "phone-4") == IPHONE
 
 
 def test_auto_falls_back_to_the_built_in_camera():

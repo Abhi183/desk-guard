@@ -217,6 +217,7 @@ const ICONS = {
   folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
   camera: '<rect x="2" y="6" width="14" height="12" rx="2.5"/><path d="M16 10.5l6-3.5v10l-6-3.5"/>',
   chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/>',
   laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
   auto: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/>',
   eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
@@ -474,12 +475,13 @@ const PAGES = {
         h("div", { class: "radio" }));
       return row;
     };
-    const autoDetail = "Uses an external camera when one is plugged in, otherwise the built-in camera." +
+    const autoDetail = "Uses a plugged-in webcam, otherwise the built-in camera. Your iPhone only if it's the last one left." +
       (state.camera === "auto" && cameraInUseName() ? ` Now: ${cameraInUseName()}.` : "");
     const rows = [choice("auto", "auto", "Automatic", autoDetail)];
     for (const c of connected) {
-      rows.push(choice(c.id, c.built_in ? "laptop" : "camera", c.name,
-        c.built_in ? "Built-in camera" : "External camera", { inUse: c.id === inUse }));
+      rows.push(choice(c.id, c.continuity ? "phone" : c.built_in ? "laptop" : "camera", c.name,
+        c.continuity ? "iPhone (Continuity Camera)" : c.built_in ? "Built-in camera" : "External camera",
+        { inUse: c.id === inUse }));
     }
     if (pickedMissing) {
       rows.push(choice(state.camera, "camera", state.camera_name || "Your camera",

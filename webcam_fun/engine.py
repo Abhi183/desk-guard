@@ -1,8 +1,8 @@
 """The watcher, run inside the app on background threads.
 
 Two threads:
-  - the camera thread reads frames as fast as the camera delivers them and keeps only the
-    newest, so a slow frame never makes the video fall behind;
+  - AVFoundation's capture queue delivers frames from the camera you picked (by its ID,
+    see avcamera.py) and keeps only the newest, so the video never falls behind;
   - the watcher thread runs DeskApp on the newest frame and, while the video window is
     visible, renders it for the window to pick up.
 
@@ -10,99 +10,55 @@ Settings, key presses and commands are handed over through a lock and applied at
 of the next frame, so nothing has to restart and no model is reloaded.
 """
 
-import os
 import threading
 import time
 from collections import deque
 from typing import Callable
 
-# OpenCV must not ask for camera permission itself: it can only do that on the main thread.
-# The app asks through AVFoundation before starting the watcher.
-os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "1")
+import cv2
+import numpy as np
 
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
-
-from webcam_fun import macos, personal  # noqa: E402
-from webcam_fun import settings as cfg  # noqa: E402
-from webcam_fun.cameras import Camera, choose, list_cameras  # noqa: E402
-from webcam_fun.desk import DeskApp, parse_args  # noqa: E402
-from webcam_fun.stats import StatsStore  # noqa: E402
-from webcam_fun.vision import try_open_camera  # noqa: E402
+from webcam_fun import macos, personal
+from webcam_fun import settings as cfg
+from webcam_fun.avcamera import AVCamera
+from webcam_fun.cameras import Camera, choose, list_cameras
+from webcam_fun.desk import DeskApp, parse_args
+from webcam_fun.stats import StatsStore
 
 FRAME_WAIT_S = 1.0          # no new frame for this long: the camera is gone (screen locked)
 RECONNECT_DELAY_S = 2.0
 FPS_REPORT_S = 60.0
 STATS_SAVE_S = 60.0
 COMMANDS = {"water": "drank_water"}  # commands from the app -> DeskApp methods
-CAMERA_CHECK_S = 2.0        # how often to look for a better camera (plugged in, or picked)
+CAMERA_CHECK_S = 2.0
+FAILED_CAMERA_WAIT_S = 10.0  # a camera that wouldn't start isn't tried again before this        # how often to look for a better camera (plugged in, or picked)
 RESTART_DELAY_S = 2.0       # after a crash, wait this long before watching again
 MAX_CRASHES, CRASH_WINDOW_S = 3, 300.0
 GREEN_HEX = "#30a46c"
 
 
-class LatestFrameCamera:
-    """Reads the camera on its own thread and keeps only the newest frame.
-
-    The reading thread also releases the camera, so release() never runs during a read.
-    """
-
-    def __init__(self, cap: cv2.VideoCapture) -> None:
-        self._cap = cap
-        self._cond = threading.Condition()
-        self._frame: np.ndarray | None = None
-        self._seq = 0
-        self._failed = False
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, name="camera", daemon=True)
-        self._thread.start()
-
-    def _loop(self) -> None:
-        try:
-            while self._running:
-                ok, frame = self._cap.read()
-                with self._cond:
-                    if not ok:
-                        self._failed = True
-                        return
-                    self._frame, self._seq = frame, self._seq + 1
-                    self._cond.notify_all()
-        finally:
-            self._cap.release()
-            with self._cond:
-                self._failed = True
-                self._cond.notify_all()
-
-    def read(self, last_seq: int, timeout: float) -> tuple[np.ndarray | None, int]:
-        """The newest frame after `last_seq`; (None, last_seq) if none came in time."""
-        with self._cond:
-            self._cond.wait_for(lambda: self._seq > last_seq or self._failed, timeout)
-            if self._seq > last_seq:
-                return self._frame, self._seq
-            return None, last_seq
-
-    def close(self, timeout: float = 2.0) -> None:
-        """Ask the reader to stop; it releases the camera after its current read."""
-        self._running = False
-        self._thread.join(timeout)
-
-
 class _Feed:
-    """The camera one run is watching with. Can switch to another camera."""
+    """The camera one run is watching with."""
 
-    def __init__(self) -> None:
-        self.reader: LatestFrameCamera | None = None
+    def __init__(self, opener: Callable[[], AVCamera] = AVCamera) -> None:
+        self._opener = opener
+        self.reader: AVCamera | None = None
         self.camera: Camera | None = None
 
     def open(self, camera: Camera) -> bool:
-        """Open `camera` (closing nothing). False if it gives no picture."""
-        cap = try_open_camera(camera.index)
-        if cap is None:
+        """Start a session on `camera`. False if it gives no picture."""
+        reader = self._opener()
+        if not reader.open(camera.uid):
+            reader.close()
             return False
-        if not cap.read()[0]:
-            cap.release()
+        self.reader, self.camera = reader, camera
+        return True
+
+    def switch(self, camera: Camera) -> bool:
+        """Swap the running session over to `camera` (fast). False keeps the old one."""
+        if self.reader is None or not self.reader.switch_to(camera.uid):
             return False
-        self.reader, self.camera = LatestFrameCamera(cap), camera
+        self.camera = camera
         return True
 
     def close(self) -> None:
@@ -129,6 +85,7 @@ class Watcher:
         self._on_status = on_status
         self._on_camera = on_camera  # the camera in use changed
         self.in_use: Camera | None = None
+        self._failed: tuple[str, float] | None = None  # (camera ID, when it failed)
         self._lock = threading.Lock()
         self._pending: cfg.Settings | None = settings
         self._latest_settings = settings
@@ -354,17 +311,19 @@ class Watcher:
         best = choose(list_cameras(), self._wanted())
         if best is None or feed.camera is None or best.uid == feed.camera.uid:
             return False
+        if self._failed is not None and self._failed[0] == best.uid and \
+                time.monotonic() - self._failed[1] < FAILED_CAMERA_WAIT_S:
+            return False
         old = feed.camera
-        feed.close()
-        if feed.open(best):
-            log(f"switched camera: {old.name} -> {best.name}")
+        started = time.monotonic()
+        if feed.switch(best):
+            log(f"switched camera: {old.name} -> {best.name} "
+                f"({time.monotonic() - started:.1f} s)")
             self._use(feed)
             return True
-        log(f"could not open {best.name}; staying with {old.name}")
-        current = choose(list_cameras(), old.uid)  # its number may have changed
-        if current is not None and feed.open(current):
-            return True
-        return False  # the next read fails and _reconnect takes over
+        log(f"could not switch to {best.name}; staying with {old.name}")
+        self._failed = (best.uid, time.monotonic())
+        return False
 
     def _reconnect(self, run: _Run, feed: _Feed) -> bool:
         """The picture stopped: the camera was unplugged, or macOS paused it while the
