@@ -2,17 +2,19 @@
 lets you start/stop it and flip its options from the top menu bar."""
 
 import fcntl
-import json
 import subprocess
 import sys
+import time
 
 import rumps
+from AppKit import NSApplication
 from Foundation import NSUserDefaults
 from rumps import rumps as rumps_core
 
 from webcam_fun import macos
+from webcam_fun import settings as cfg
 from webcam_fun.dock import QUIT_ALL_REQUEST, hide_from_dock
-from webcam_fun.identity import clean_name
+from webcam_fun.gestures import __doc__ as GESTURE_HELP
 from webcam_fun.recognition import forget_profile
 from webcam_fun.vision import ROOT
 
@@ -21,8 +23,6 @@ LOG_FILE = ROOT / "desk.log"
 LOCK_FILE = ROOT / ".menubar.lock"
 SHOW_REQUEST = ROOT / ".show_request"  # touched by a second launch of the app
 CAUGHT_DIR = ROOT / "caught"
-DEFAULT_SETTINGS = {"show_video": True, "auto_lock": True, "posture": True, "gestures": True,
-                    "privacy": True, "cursor": True}
 ICON_ON, ICON_OFF = "👁", "◌"
 POLL_S = 2
 RETRY_S = 6
@@ -34,38 +34,16 @@ ITEM_PREFERRED_POSITION = 260.0
 CAMERA_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
 
 START, STOP = "Start watching", "Stop watching"
-VIDEO, LOCK, POSTURE = "Show video window", "Lock when I leave", "Posture alerts"
-GESTURES = "Gesture control (only you)"
-PRIVACY = "Close personal apps when someone sits with me"
-CURSOR = "Hand moves the pointer (point up)"
-RELEARN = "Relearn my face"
-OPTION_KEYS = {VIDEO: "show_video", LOCK: "auto_lock", POSTURE: "posture", GESTURES: "gestures",
-               CURSOR: "cursor", PRIVACY: "privacy"}
+VIDEO = "Show video window"
+ENABLE_ALL, DISABLE_ALL = "Enable all features", "Disable all features"
+GROUP_ON, GROUP_OFF = "Enable all gestures", "Disable all gestures"
+FEATURES_MENU, GESTURES_MENU, LOCK_MENU = "Features", "Gestures", "Lock after"
+SENSITIVITY_TITLE = "Hold time: {level} ({seconds:g}s)"
+GUIDE, RELEARN = "Gesture guide...", "Relearn my face"
 CAUGHT, LOG, QUIT = "Open caught photos", "Open log", "Quit Desk Guard"
-
-
-def load_settings() -> dict:
-    try:
-        saved = json.loads(SETTINGS_FILE.read_text())
-    except (OSError, ValueError):
-        saved = {}
-    return {k: bool(saved.get(k, v)) for k, v in DEFAULT_SETTINGS.items()}
-
-
-def load_name() -> str:
-    """Your name from the "name" entry in the settings file; "you" when it isn't set."""
-    try:
-        saved = json.loads(SETTINGS_FILE.read_text())
-    except (OSError, ValueError):
-        return clean_name(None)
-    return clean_name(saved.get("name") if isinstance(saved, dict) else None)
-
-
-def save_settings(settings: dict) -> None:
-    try:
-        SETTINGS_FILE.write_text(json.dumps({**settings, "name": load_name()}, indent=2))
-    except OSError as e:
-        print(f"could not save settings: {e}", file=sys.stderr)
+# Several quick clicks in the menu restart the watcher once, after the last click.
+RESTART_DEBOUNCE_S = 0.8
+APPLY_TICK_S = 0.25
 
 
 def single_instance_or_exit():
@@ -94,15 +72,22 @@ class DeskGuardMenu(rumps.App):
     def __init__(self) -> None:
         super().__init__("Desk Guard", title=ICON_OFF, quit_button=None)
         self.placed = False
-        self.settings = load_settings()
+        self.settings = cfg.load(SETTINGS_FILE)
+        self.restart_at: float | None = None  # pending restart to apply new settings
         self.child: subprocess.Popen | None = None
         self.blocked = False  # camera permission missing; keep retrying
         self.retry_ticks = 0
         self.status = rumps.MenuItem("Stopped")
         self.toggle = rumps.MenuItem(START, callback=self.on_toggle)
-        self.items = {name: rumps.MenuItem(name, callback=self.on_option)
-                      for name in OPTION_KEYS}
-        self.menu = [self.status, self.toggle, None, *self.items.values(),
+        self.switches: dict[str, rumps.MenuItem] = {}
+        self.lock_items: dict[int, rumps.MenuItem] = {}
+        self.sensitivity_items: dict[str, rumps.MenuItem] = {}
+        self.menu = [self.status, self.toggle, None,
+                     self._switch_item("show_video", VIDEO),
+                     rumps.MenuItem(ENABLE_ALL, callback=lambda _: self.set_all(True)),
+                     rumps.MenuItem(DISABLE_ALL, callback=lambda _: self.set_all(False)),
+                     None, self._features_menu(), self._gestures_menu(), self._lock_menu(),
+                     None, rumps.MenuItem(GUIDE, callback=self.on_guide),
                      rumps.MenuItem(RELEARN, callback=self.on_relearn), None,
                      rumps.MenuItem(CAUGHT, callback=self.on_caught),
                      rumps.MenuItem(LOG, callback=self.on_log), None,
@@ -110,27 +95,48 @@ class DeskGuardMenu(rumps.App):
         self._sync_checkmarks()
         self.timer = rumps.Timer(self.on_poll, POLL_S)
         self.timer.start()
+        self.apply_timer = rumps.Timer(self.on_apply_tick, APPLY_TICK_S)
+        self.apply_timer.start()
         self.start()
+
+    # ---------- menu building ----------
+    def _switch_item(self, key: str, title: str) -> rumps.MenuItem:
+        item = rumps.MenuItem(title, callback=lambda _, k=key: self.on_switch(k))
+        self.switches[key] = item
+        return item
+
+    def _features_menu(self) -> rumps.MenuItem:
+        parent = rumps.MenuItem(FEATURES_MENU)
+        parent.update([self._switch_item(k, title) for k, title in cfg.FEATURES.items()])
+        return parent
+
+    def _gestures_menu(self) -> rumps.MenuItem:
+        parent = rumps.MenuItem(GESTURES_MENU)
+        on = rumps.MenuItem(GROUP_ON, callback=lambda _: self.set_gestures(True))
+        off = rumps.MenuItem(GROUP_OFF, callback=lambda _: self.set_gestures(False))
+        switches = [self._switch_item(k, title) for k, title in cfg.GESTURES.items()]
+        for level, seconds in cfg.SENSITIVITY.items():
+            self.sensitivity_items[level] = rumps.MenuItem(
+                SENSITIVITY_TITLE.format(level=level, seconds=seconds),
+                callback=lambda _, lv=level: self.on_sensitivity(lv))
+        parent.update([on, off, None, switches[0], None, *switches[1:], None,
+                       *self.sensitivity_items.values()])
+        return parent
+
+    def _lock_menu(self) -> rumps.MenuItem:
+        parent = rumps.MenuItem(LOCK_MENU)
+        for seconds in cfg.LOCK_CHOICES:
+            self.lock_items[seconds] = rumps.MenuItem(
+                f"{seconds} seconds", callback=lambda _, s=seconds: self.on_lock_after(s))
+        parent.update(list(self.lock_items.values()))
+        return parent
 
     # ---------- child process ----------
     def running(self) -> bool:
         return self.child is not None and self.child.poll() is None
 
     def command(self) -> list[str]:
-        cmd = [sys.executable, "-m", "webcam_fun.desk", "--name", load_name()]
-        if not self.settings["show_video"]:
-            cmd.append("--no-window")
-        if not self.settings["auto_lock"]:
-            cmd.append("--no-lock")
-        if not self.settings["posture"]:
-            cmd.append("--no-posture")
-        if not self.settings["gestures"]:
-            cmd.append("--no-gestures")
-        if not self.settings["privacy"]:
-            cmd.append("--no-privacy")
-        if not self.settings["cursor"]:
-            cmd.append("--no-cursor")
-        return cmd
+        return [sys.executable, "-m", "webcam_fun.desk", *cfg.to_args(self.settings)]
 
     def start(self) -> None:
         if self.running():
@@ -154,14 +160,49 @@ class DeskGuardMenu(rumps.App):
     def on_toggle(self, _) -> None:
         self.stop() if self.running() else self.start()
 
-    def on_option(self, sender: rumps.MenuItem) -> None:
-        key = OPTION_KEYS[sender.title]
-        self.settings = {**self.settings, key: not self.settings[key]}
-        save_settings(self.settings)
+    def on_switch(self, key: str) -> None:
+        self.change(cfg.toggled(self.settings, key))
+
+    def set_all(self, on: bool) -> None:
+        self.change(cfg.with_all(self.settings, on))
+
+    def set_gestures(self, on: bool) -> None:
+        self.change(cfg.with_group(self.settings, cfg.GESTURE_SWITCHES, on))
+
+    def on_sensitivity(self, level: str) -> None:
+        self.change(self.settings.with_sensitivity(level))
+
+    def on_lock_after(self, seconds: int) -> None:
+        self.change(self.settings.with_lock_after(seconds))
+
+    def change(self, new: cfg.Settings) -> None:
+        """Save new settings, update the checkmarks, and restart the watcher to apply them."""
+        if new == self.settings:
+            return
+        self.settings = new
+        try:
+            cfg.save(new, SETTINGS_FILE)
+        except OSError as e:
+            print(f"could not save settings: {e}", file=sys.stderr)
+            macos.popup("Desk Guard", f"Settings not saved: {e}", "#f5a623")
         self._sync_checkmarks()
         if self.running():  # options are command-line flags, so restart to apply
+            self.restart_at = time.monotonic() + RESTART_DEBOUNCE_S
+
+    def on_apply_tick(self, _) -> None:
+        if self.restart_at is None or time.monotonic() < self.restart_at:
+            return
+        self.restart_at = None
+        if self.running():
             self.stop()
             self.start()
+
+    def on_guide(self, _) -> None:
+        guide = GESTURE_HELP.split("\n\n", 1)[1].rsplit("\nKeys:", 1)[0].strip()
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)  # else it opens behind
+        rumps.alert("Desk Guard gestures",
+                    f"{guide}\n\nHold time is set under Gestures. Mute needs a longer hold "
+                    "so a relaxed hand doesn't mute you.")
 
     def on_relearn(self, _) -> None:
         """Forget the saved face; the watcher learns it again as soon as it sees one face."""
@@ -241,8 +282,17 @@ class DeskGuardMenu(rumps.App):
                     "#30a46c")
 
     def _sync_checkmarks(self) -> None:
-        for title, key in OPTION_KEYS.items():
-            self.items[title].state = self.settings[key]
+        flags = self.settings.flags
+        for key, item in self.switches.items():
+            item.state = flags[key]
+        gestures_on = flags["gestures"]
+        for key in cfg.GESTURE_SWITCHES[1:]:  # greyed out while gestures are off
+            self.switches[key].set_callback(
+                (lambda _, k=key: self.on_switch(k)) if gestures_on else None)
+        for seconds, item in self.lock_items.items():
+            item.state = seconds == self.settings.lock_after
+        for level, item in self.sensitivity_items.items():
+            item.state = level == self.settings.sensitivity
 
     def _refresh(self) -> None:
         on = self.running()

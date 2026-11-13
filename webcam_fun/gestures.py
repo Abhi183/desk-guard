@@ -1,7 +1,7 @@
 """Control the Mac with hand gestures.
 
   thumbs up / down (hold)   volume up / down
-  fist (hold)               mute / unmute
+  fist (hold a little longer) mute / unmute
   peace sign (hold)         take a webcam selfie
   love-you sign (hold)      play / pause media (YouTube, Spotify, Music...)
   point left / right (hold)  previous / next browser tab (needs Accessibility)
@@ -41,6 +41,16 @@ LABELS = {"Thumb_Up": "volume up", "Thumb_Down": "volume down", "Closed_Fist": "
 CURSOR_HELP = "pointer: pinch or open palm = click | fist = lift | lower hand = stop"
 CURSOR_LIFTED = "pointer lifted: move your hand, then point again"
 NO_MOUSE_ACCESS = "pointer blocked: allow Desk Guard / Python in Accessibility"
+# Which setting switches each gesture on and off (see webcam_fun.settings).
+GESTURE_ACTIONS = {"Thumb_Up": "volume", "Thumb_Down": "volume", "Closed_Fist": "mute",
+                   "Victory": "selfie", "ILoveYou": "media", "Point_Right": "tabs",
+                   "Point_Left": "tabs"}
+DEFAULT_HOLD_S = 0.4
+MIN_HOLD_S, MAX_HOLD_S = 0.1, 2.0
+# A fist also shows up while you lower or relax your hand, so mute needs a longer hold.
+MUTE_HOLD_S = 0.8
+# Lowering your hand after using the pointer passes through fists and palms; ignore them.
+AFTER_POINTER_S = 0.8
 HAND_CONNECTIONS = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
                     (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15),
                     (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17))
@@ -52,8 +62,39 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-keys", action="store_true", help="don't switch tabs when pointing")
     p.add_argument("--no-cursor", action="store_true",
                    help="don't let a raised index finger take the mouse pointer")
+    add_gesture_options(p)
     p.add_argument("--camera", type=int, default=0)
-    return p.parse_args()
+    return check_gesture_options(p, p.parse_args())
+
+
+def add_gesture_options(p: argparse.ArgumentParser) -> None:
+    """Options shared with desk.py."""
+    names = ", ".join(sorted(set(GESTURE_ACTIONS.values())))
+    p.add_argument("--gestures-off", default="", metavar="LIST",
+                   help=f"comma-separated gestures to ignore: {names}")
+    p.add_argument("--gesture-hold", type=float, default=DEFAULT_HOLD_S, metavar="SECONDS",
+                   help=f"how long to hold a gesture before it fires (default {DEFAULT_HOLD_S})")
+
+
+def check_gesture_options(p: argparse.ArgumentParser,
+                          args: argparse.Namespace) -> argparse.Namespace:
+    known = set(GESTURE_ACTIONS.values())
+    unknown = parse_off(args.gestures_off) - known
+    if unknown:
+        p.error(f"--gestures-off: unknown gesture {', '.join(sorted(unknown))}; "
+                f"choose from {', '.join(sorted(known))}")
+    if not MIN_HOLD_S <= args.gesture_hold <= MAX_HOLD_S:
+        p.error(f"--gesture-hold must be between {MIN_HOLD_S} and {MAX_HOLD_S} seconds")
+    return args
+
+
+def parse_off(text: str) -> set[str]:
+    return {part.strip() for part in text.split(",") if part.strip()}
+
+
+def gesture_action(gesture: str | None) -> str | None:
+    """The setting that controls this gesture, or None if it has none."""
+    return GESTURE_ACTIONS.get(gesture)
 
 
 def make_recognizer():
@@ -78,12 +119,17 @@ def draw_hand(img: np.ndarray, landmarks) -> None:
 
 class GestureApp:
     def __init__(self, args: argparse.Namespace) -> None:
-        self.send_keys = not args.no_keys
+        self.send_keys = not getattr(args, "no_keys", False)
         self.cursor_enabled = not getattr(args, "no_cursor", False)
+        self.disabled = frozenset(parse_off(getattr(args, "gestures_off", "")))
+        hold = getattr(args, "gesture_hold", DEFAULT_HOLD_S)
+        self.pointer_released_at = float("-inf")
+        self.last_off: str | None = None  # a gesture you're making that is switched off
         self.cursor_mode = CursorMode()
         self.cursor_driver = CursorDriver()
         self.cursor_lifted = False
-        self.trigger = HoldTrigger(hold_s=0.4, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4})
+        self.trigger = HoldTrigger(hold_s=hold, repeat_s={"Thumb_Up": 0.4, "Thumb_Down": 0.4},
+                                   hold_overrides={"Closed_Fist": max(MUTE_HOLD_S, hold * 2)})
         self.flash_until = 0.0
         self.message, self.message_until = "", 0.0
         self.ignoring_hand = False  # a hand is in view but it isn't yours
@@ -141,6 +187,13 @@ class GestureApp:
             return gesture
         if points is not None:  # sideways pointing isn't a built-in gesture
             gesture = classify_point(points) or gesture
+        if now - self.pointer_released_at < AFTER_POINTER_S:
+            self.trigger.update(None, now)
+            return gesture
+        self.last_off = gesture if gesture_action(gesture) in self.disabled else None
+        if self.last_off:
+            self.trigger.update(None, now)  # switched off in settings: don't even charge
+            return gesture
         fired = self.trigger.update(gesture, now)
         if fired:
             self.act(fired, frame, now)
@@ -150,6 +203,7 @@ class GestureApp:
         """Pointer control for this frame. True while your hand holds the pointer."""
         step = self.cursor_mode.update(gesture, pinch_ratio(points) if points else None, now)
         if step.left:
+            self.pointer_released_at = now
             self.say("pointer released", now)
         if not step.active or points is None:
             return step.active
@@ -184,6 +238,8 @@ class GestureApp:
             return f"{held.replace('_', ' ')}: {LABELS.get(held, '')}", True
         if self.ignoring_hand:
             return "not your hand, ignored", False
+        if self.last_off:
+            return f"{self.last_off.replace('_', ' ')}: switched off in settings", False
         if result.hand_landmarks:
             return "hand seen, no gesture yet", False
         return "no hand in view", False

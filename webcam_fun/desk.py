@@ -16,7 +16,12 @@ import numpy as np
 from webcam_fun import macos, personal
 from webcam_fun.body import BODY_MIN_SHARE, BodyDetector
 from webcam_fun.dock import QUIT_ALL_REQUEST, on_dock_quit, use_desk_guard_icon
-from webcam_fun.gestures import GestureApp, GestureEngine
+from webcam_fun.gestures import (
+    GestureApp,
+    GestureEngine,
+    add_gesture_options,
+    check_gesture_options,
+)
 from webcam_fun.identity import (
     CompanyWatch,
     MeTracker,
@@ -72,6 +77,7 @@ def parse_args() -> argparse.Namespace:
                    help="gestures: don't switch tabs when pointing")
     p.add_argument("--no-cursor", action="store_true",
                    help="gestures: don't let a raised index finger take the mouse pointer")
+    add_gesture_options(p)
     p.add_argument("--no-privacy", action="store_true",
                    help="don't close personal apps when someone sits with you")
     p.add_argument("--company-after", type=float, default=DEFAULT_COMPANY_AFTER_S,
@@ -79,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--name", default="you",
                    help="what to call you on the box around your face (default: you)")
     p.add_argument("--camera", type=int, default=0)
-    args = p.parse_args()
+    args = check_gesture_options(p, p.parse_args())
     args.name = clean_name(args.name)
     if args.lock_after < MIN_LOCK_AFTER_S:
         p.error(f"--lock-after must be at least {MIN_LOCK_AFTER_S} second")
@@ -104,8 +110,9 @@ class DeskApp:
         self.message, self.message_until = "", 0.0
         self.posture_status = "calibrating"
         self.gestures_enabled = not args.no_gestures
-        self.gesture_app = GestureApp(argparse.Namespace(no_keys=args.no_keys,
-                                                         no_cursor=args.no_cursor))
+        self.gesture_app = GestureApp(argparse.Namespace(
+            no_keys=args.no_keys, no_cursor=args.no_cursor, gestures_off=args.gestures_off,
+            gesture_hold=args.gesture_hold))
         self.gesture_engine: GestureEngine | None = None
         self.gesture_result = None
         self.quit_requested = False

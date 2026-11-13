@@ -13,8 +13,9 @@ class HoldTrigger:
     """
 
     def __init__(self, hold_s: float = 0.5, repeat_s: dict[str, float] | None = None,
-                 grace_s: float = 0.25) -> None:
+                 grace_s: float = 0.25, hold_overrides: dict[str, float] | None = None) -> None:
         self.hold_s = hold_s
+        self.hold_overrides = dict(hold_overrides or {})  # gestures that need a longer hold
         self.repeat_s = dict(repeat_s or {})
         self.grace_s = grace_s
         self._current: str | None = None
@@ -44,7 +45,7 @@ class HoldTrigger:
 
     def _maybe_fire(self, name: str, now: float) -> str | None:
         if self._last_fire is None:
-            if now - self._since + EPS >= self.hold_s:
+            if now - self._since + EPS >= self._hold_for(name):
                 self._last_fire = now
                 return name
             return None
@@ -54,10 +55,13 @@ class HoldTrigger:
             return name
         return None
 
+    def _hold_for(self, name: str | None) -> float:
+        return self.hold_overrides.get(name, self.hold_s)
+
     def progress(self, now: float) -> float:
         """0..1 for the on-screen 'charging' bar."""
         if self.current is None:
             return 0.0
         if self._last_fire is not None:
             return 1.0
-        return min((now - self._since) / self.hold_s, 1.0)
+        return min((now - self._since) / self._hold_for(self._current), 1.0)

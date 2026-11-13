@@ -43,13 +43,17 @@ from scripts.
 | Gesture | Action |
 |---|---|
 | Thumbs up / down (hold) | Volume up / down, with the normal macOS volume pop-up |
-| Fist (hold) | Mute toggle |
+| Fist (hold a bit longer, 0.8 s) | Mute toggle |
 | Index finger pointing left / right (hold) | Previous / next browser tab |
 | Peace sign (hold) | Webcam selfie to `snaps/` |
 | Love-you sign 🤟 (hold) | Play / pause whatever is playing (YouTube, Spotify, Music) |
 | Index finger pointing up (hold) | Take the mouse pointer. See below |
 
-A gesture fires when the green bar under the banner fills (about 0.4 s).
+A gesture fires when the green bar under the banner fills (0.4 s by default; change it under
+Gestures > Hold time). Mute needs a longer hold because a relaxed or lowered hand often looks
+like a fist. Right after you let go of the pointer, gestures pause for a moment so lowering
+your hand doesn't trigger anything. Each gesture can be switched off on its own; a switched-off
+gesture shows "switched off in settings" in the status strip instead of firing.
 
 ### Moving the pointer
 
@@ -113,11 +117,21 @@ are listed at the top of `webcam_fun/personal.py`.
 
 ## Menu bar
 
-The eye icon has: start/stop watching, show video window, lock when I leave, posture alerts,
-gesture control, close personal apps when someone sits with me, relearn my face, open caught
-photos, open log, quit. Choices are saved in
-`menubar_settings.json`. Quitting from the Dock or pressing `q` in the video window closes the
-whole app; "Stop watching" only pauses.
+The eye icon has:
+
+- Start / stop watching, and Show video window
+- Enable all features / Disable all features (everything below on or off at once)
+- Features: lock when I leave, shoulder-surfer alarm, posture alerts, close personal apps
+  when someone sits with me, sounds
+- Gestures: enable or disable all gestures, the gesture master switch, one switch per
+  gesture (volume, mute, selfie, play/pause, tabs, pointer), and the hold time
+  (fast 0.25 s, normal 0.4 s, careful 0.7 s)
+- Lock after: 2, 5, 10 or 30 seconds
+- Gesture guide, relearn my face, open caught photos, open log, quit
+
+Choices are saved in `menubar_settings.json` and applied by restarting the watcher about a
+second after your last click, so flipping several switches restarts it once. Quitting from
+the Dock or pressing `q` in the video window closes the whole app; "Stop watching" only pauses.
 
 Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate posture,
 `l` auto-lock on/off, `g` gestures on/off, `f` relearn my face.
@@ -156,6 +170,7 @@ Video window keys: `q` quit, `m` mute, `t` always-on-top, `c` recalibrate postur
 
 - `webcam_fun/desk.py` main loop: faces, lock, posture, gestures, video window
 - `webcam_fun/menubar.py` menu bar app that starts and stops `desk.py`
+- `webcam_fun/settings.py` saved options and the `desk.py` flags they turn into (unit tested)
 - `webcam_fun/gestures.py`, `pointing.py`, `gesture_trigger.py` gesture recognition and actions
 - `webcam_fun/cursor.py` pointer control logic (unit tested)
 - `webcam_fun/presence.py`, `watch.py`, `posture.py`, `identity.py` decision logic (unit tested)
